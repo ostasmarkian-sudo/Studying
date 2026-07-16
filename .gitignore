@@ -40,3 +40,6 @@ Desktop.ini
 *.bak
 sqlite/data/library.db
 .git-backup/
+Ff+watermark.jpg
+input.jpg
+.jpg
