@@ -1,0 +1,25 @@
+
+           ip: 192.168.1.15
+           date: 06/Jul/2026:14:35:12 +0300
+           method:GET
+           path: /index.html
+           protocol: HTTP/1.1
+           status: 200
+           size: 1543
+           
+           ip: 10.0.0.5
+           date: 06/Jul/2026:14:35:18 +0300
+           method:POST
+           path: /login
+           protocol: HTTP/1.1
+           status: 302
+           size: 0
+           
+           ip: 172.16.8.100
+           date: 06/Jul/2026:14:36:01 +0300
+           method:DELETE
+           path: /api/user/15
+           protocol: HTTP/2
+           status: 404
+           size: 512
+           
