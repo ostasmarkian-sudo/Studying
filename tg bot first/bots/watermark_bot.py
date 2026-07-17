@@ -47,8 +47,8 @@ def water(message):
             bot.send_photo(message.chat.id, open(f"{name}+watermark.jpg", "rb"))
         else:
             bot.send_message(message.chat.id, "")
-    except:
-        bot.send_message(message.chat.id, f" Error:{Exception}")
+    except Exception as e:
+        bot.send_message(message.chat.id, f" Error:{e}")
 
 
 bot.polling()

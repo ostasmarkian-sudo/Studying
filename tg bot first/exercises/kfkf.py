@@ -1,7 +1,8 @@
-x = 10
-for i in range(10):
-    print(x)
-    x -= 1
-    if x == 0:
-        print(x)
-        print("Liftoff!")
+def sum_elem(n):
+    if n < 10:
+        return n
+
+    return n % 10 + sum_elem(n // 10)
+
+
+print(sum_elem(999))
