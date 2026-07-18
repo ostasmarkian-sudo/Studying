@@ -5,4 +5,4 @@ def sum_elem(n):
     return n % 10 + sum_elem(n // 10)
 
 
-print(sum_elem(999))
+print(sum_elem(20))
