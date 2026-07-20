@@ -1,5 +1,4 @@
 from wordfreq import zipf_frequency
-
 from converter import to_english, to_ukrainian
 
 
@@ -41,7 +40,7 @@ def detect_word(word: str) -> dict:
     }
 
     if should_skip(word):
-        result["reason"] = "Слово пропущено"
+        result["reason"] = "word missing"
         return result
 
     english_variant = to_english(word)
@@ -63,11 +62,11 @@ def detect_word(word: str) -> dict:
     difference = abs(english_score - ukrainian_score)
 
     if best_score < MIN_FREQUENCY:
-        result["reason"] = "Обидва варіанти невідомі"
+        result["reason"] = "both chose unknown"
         return result
 
     if difference < MIN_DIFFERENCE:
-        result["reason"] = "Недостатня різниця між варіантами"
+        result["reason"] = ""
         return result
 
     if english_score > ukrainian_score:

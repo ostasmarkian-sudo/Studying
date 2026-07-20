@@ -1,0 +1,15 @@
+https://www.google.com
+https://github.com
+https://stackoverflow.com
+https://www.wikipedia.org
+https://www.python.org
+https://docs.python.org
+https://pypi.org
+https://www.microsoft.com
+https://www.cloudflare.com
+https://www.mozilla.org
+https://www.nasa.gov
+https://httpbin.org/status/200
+https://httpbin.org/status/404
+https://httpbin.org/status/500
+https://this-site-does-not-exist.invalid
