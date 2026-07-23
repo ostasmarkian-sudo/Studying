@@ -1,6 +1,5 @@
 from collections import Counter
 import re
-import sys
 
 
 def filt(log_name):

@@ -6,6 +6,7 @@ import telebot
 from config import TG_BOT_TOKEN, CHAT_ID
 
 bot = telebot.TeleBot(TG_BOT_TOKEN)
+headers = {"User-Agent": "MyWebsiteMonitoring"}
 
 
 def update():
@@ -35,7 +36,7 @@ def update():
                 error_message = None
                 start = time.perf_counter()
                 try:
-                    check = requests.get(url, timeout=5)
+                    check = requests.get(url, timeout=5, headers=headers)
                     status_code = check.status_code
                     check.raise_for_status()
                     response_time = time.perf_counter() - start
@@ -48,12 +49,9 @@ def update():
 
                 except requests.RequestException as error:
                     response_time = time.perf_counter() - start
-                    status_code = None
                     is_available = False
                     error_message = str(error)[:64]
                 response_time = round(response_time, 3)
-                if status != status_code:
-                    bot.send_message(CHAT_ID, f"{url} change status to {status_code}")
                 cursor.execute(
                     """
                             INSERT INTO checks(website_id,status_code,response_time,is_available,error_message)
@@ -67,8 +65,5 @@ def update():
                         error_message,
                     ),
                 )
-
-
-while True:
-    update()
-    time.sleep(600)
+                if status != status_code:
+                    bot.send_message(CHAT_ID, f"{url} change status to {status_code}")

@@ -4,6 +4,8 @@ import requests
 import re
 from config import DATABASE_CONFIG
 
+headers = {"User-Agent": "MyWebsiteMonitoring"}
+
 
 def add_new_website(url_clean):
     match = re.search(
@@ -37,7 +39,7 @@ def add_new_website(url_clean):
     is_available = False
     error_message = None
     try:
-        check = requests.get(url1c, timeout=5)
+        check = requests.get(url1c, timeout=5, headers=headers)
         check.raise_for_status()
 
         status_code = check.status_code
