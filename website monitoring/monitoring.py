@@ -48,15 +48,15 @@ def update():
                     is_available = False
                     bot.send_message(CHAT_ID, f"Connection forced closed {error}")
                     response_time = time.perf_counter() - start
-                    error_message = str(error)
+                    error_message = str(error)[:64]
                 except requests.HTTPError as error:
                     response_time = time.perf_counter() - start
-                    error_message = str(error)
+                    error_message = str(error)[:64]
                     is_available = False
                 except requests.RequestException as error:
                     response_time = time.perf_counter() - start
                     is_available = False
-                    error_message = str(error)
+                    error_message = str(error)[:64]
                 response_time = round(response_time, 3)
                 cursor.execute(
                     """

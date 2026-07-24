@@ -107,3 +107,36 @@ def find_website_history(name_or_url):
                 return
             for row in results:
                 print(row)
+
+
+def delete_website(name_or_url):
+    with psycopg.connect(**DATABASE_CONFIG) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                               SELECT id FROM websites
+                               WHERE name = %s or url = %s
+                               LIMIT 1;
+                               """,
+                (name_or_url, name_or_url),
+            )
+            website = cursor.fetchone()
+            if website is None:
+                print("Такого сайту немає в списку")
+                return
+            websites = website[0]
+            cursor.execute(
+                """
+                               DELETE FROM checks
+                               WHERE website_id = %s;                               
+                               """,
+                (websites,),
+            )
+            cursor.execute(
+                """
+                DELETE FROM websites
+                WHERE id = %s;
+                """,
+                (websites,),
+            )
+            print(f"{name_or_url} deleted")
