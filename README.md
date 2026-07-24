@@ -30,6 +30,14 @@ Experiments with SQLite databases, SQL queries, and Python database integration.
 
 A work-in-progress Python application for detecting text typed with the wrong keyboard layout and converting it between English and Ukrainian layouts.
 
+### `website monitoring`
+
+Website Monitoring System is a Python application that automatically monitors the availability of websites and stores the results in a PostgreSQL database.
+
+The program periodically sends HTTP requests to each website, records the response status, response time, availability, and any errors that occur. If a website changes its status (for example, from online to offline or vice versa), the system instantly sends a notification through a Telegram bot.
+
+This project was created to practice working with Python, PostgreSQL, HTTP requests, and database integration while building a practical monitoring tool.
+
 ## Technologies
 
 - Python 3
