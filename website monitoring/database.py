@@ -2,6 +2,8 @@ import time
 import psycopg
 import requests
 import re
+import telebot
+from apscheduler.schedulers.blocking import BlockingScheduler
 from config import DATABASE_CONFIG
 
 headers = {"User-Agent": "MyWebsiteMonitoring"}

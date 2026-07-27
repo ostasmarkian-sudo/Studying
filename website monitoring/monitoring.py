@@ -74,7 +74,3 @@ def update():
                 if status != status_code:
                     bot.send_message(CHAT_ID, f"{url} change status to {status_code}")
             print("finish")
-
-
-while True:
-    update()
