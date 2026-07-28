@@ -5,10 +5,6 @@ import telebot
 from apscheduler.schedulers.blocking import BlockingScheduler
 from config import TG_BOT_TOKEN
 
-BOT = telebot.TeleBot(TG_BOT_TOKEN)
+bot = telebot.TeleBot(TG_BOT_TOKEN)
 parse = argparse.ArgumentParser
-parse.add_argument(
-    "-a",
-    "--add",
-    type=str,
-)
+parse.add_argument("-a", "--add", type=str, help="add new websites")

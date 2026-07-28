@@ -1,10 +1,11 @@
 import time
-from config import DATABASE_CONFIG
+
 import psycopg
 import requests
 import telebot
-from config import TG_BOT_TOKEN, CHAT_ID
-import re
+
+from config import TG_BOT_TOKEN, CHAT_ID, DATABASE_CONFIG
+
 
 bot = telebot.TeleBot(TG_BOT_TOKEN)
 headers = {"User-Agent": "MyWebsiteMonitoring"}
