@@ -1,0 +1,11 @@
+<!DOCTYPE html> 
+<head>  
+<title>FastAPI</title>
+</head>
+<head>  
+<h1>Home page</h1>
+{%for tol in tool%}
+<h2>{{ tol.tools }}</h2>
+<p>{{ tol.prise }}</p>
+{% endfor  %}
+</head>
