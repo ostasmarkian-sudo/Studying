@@ -1,6 +1,12 @@
 <!DOCTYPE html> 
 <head>  
-<title>FastAPI</title>
+<title>{% if title %}
+    FastAPI - {{title}}
+    {%else%}
+    FastAPI
+    {%endif %}
+
+</title>
 </head>
 <head>  
 <h1>Home page</h1>
