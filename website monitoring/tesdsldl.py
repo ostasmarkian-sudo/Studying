@@ -25,5 +25,4 @@ async def get_data():
 
 
 loop_factory = lambda: asyncio.SelectorEventLoop(selectors.SelectSelector())
-
 asyncio.run(get_data(), loop_factory=loop_factory)

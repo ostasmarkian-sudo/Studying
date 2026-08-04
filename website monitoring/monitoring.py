@@ -5,7 +5,7 @@ import psycopg
 import selectors
 from config import DATABASE_CONFIG
 
-semaphore = asyncio.Semaphore(100)
+semaphore = asyncio.Semaphore(50)
 timeout = aiohttp.ClientTimeout(connect=5, total=10)
 HEADERS = {"User-Agent": "MyWebsiteMonitoring"}
 
@@ -95,6 +95,7 @@ async def main():
     data_r = [task.result() for task in dds]
     for data_i in data_r:
         await post_data(data_i[3], data_i[2], data_i[4], data_i[0], data_i[1])
+        print(f"checked{data_i[3]}")
 
 
 loop_factory = lambda: asyncio.SelectorEventLoop(selectors.SelectSelector())
