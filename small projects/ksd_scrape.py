@@ -7,6 +7,7 @@ from config import DATABASE_CONFIG, HEADERS
 book = "ui-catalog-card--variant-default mui-1i20r6w-ui-catalog-card"
 page = 1
 id = 1
+
 with psycopg.connect(**DATABASE_CONFIG) as connection:
     with connection.cursor() as cursor:
         while page < 233:
