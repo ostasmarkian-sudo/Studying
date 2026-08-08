@@ -1,9 +1,9 @@
 from playwright.sync_api import sync_playwright
 import sys
 
-clas = "MuiButtonBase-root MuiPaginationItem-root MuiPaginationItem-sizeLarge MuiPaginationItem-text MuiPaginationItem-circular MuiPaginationItem-page mui-1izv2jb"
-if len(sys.argv) < 2:
-    sys.exit("Немає ім'я")
+if len(sys.argv) < 3:
+    sys.exit("Вкажи назву книги та кількість або all")
+
 with sync_playwright() as playwright:
     with playwright.chromium.launch(headless=False) as browser:
         page = browser.new_page(java_script_enabled=True)
@@ -18,12 +18,26 @@ with sync_playwright() as playwright:
         )
         all_books.first.wait_for(state="visible", timeout=10_000)
         if sys.argv[2] == "all":
-            page_number = page.locator(f"//a[class={clas}]")
-            ...
+            x = 1
+            books = all_books
+            while all_books.count() == 20:
+                x += 1
+                pag = page.locator(f"//a[@aria-label='Go to page {x}']")
+                all_books = page.locator(
+                    "//a[@class='ui-catalog-card--variant-default mui-1i20r6w-ui-catalog-card']"
+                )
+                for i in range(all_books.count()):
+                    book = all_books.nth(i)
+                    print(book.inner_text())
+                    print(book.get_attribute("href"))
+                page.mouse.wheel(0, 700)
+                pag.click()
+                print(x)
+
         elif sys.argv[2]:
             number = int(sys.argv[2])
-        for i in range(number):
-            book = all_books.nth(i)
-            print(book.inner_text())
-            print(book.get_attribute("href"))
-        page.wait_for_timeout(5000)
+            for i in range(number):
+                book = all_books.nth(i)
+                print(book.inner_text())
+                print(book.get_attribute("href"))
+        page.wait_for_timeout(500)
