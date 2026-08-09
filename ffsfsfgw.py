@@ -1,5 +1,6 @@
 from playwright.sync_api import sync_playwright
 import sys
+import math
 
 if len(sys.argv) < 3:
     sys.exit("Вкажи назву книги та кількість або all")
@@ -30,14 +31,26 @@ with sync_playwright() as playwright:
                     book = all_books.nth(i)
                     print(book.inner_text())
                     print(book.get_attribute("href"))
-                page.mouse.wheel(0, 700)
+                pag.scroll_into_view_if_needed()
                 pag.click()
-                print(x)
-
-        elif sys.argv[2]:
+        else:
             number = int(sys.argv[2])
-            for i in range(number):
-                book = all_books.nth(i)
-                print(book.inner_text())
-                print(book.get_attribute("href"))
-        page.wait_for_timeout(500)
+            pages = math.ceil(number / 20)
+
+            for pager in range(1, pages + 1):
+                books_to_take = min(number, 20)
+
+                for i in range(books_to_take):
+                    book = all_books.nth(i)
+                    print(book.inner_text())
+                    print(book.get_attribute("href"))
+
+                number -= books_to_take
+
+                if pager < pages:
+                    next_page = pager + 1
+                    pag = page.locator(f"//a[@aria-label='Go to page {next_page}']")
+
+                    pag.scroll_into_view_if_needed()
+                    pag.click()
+                    page.wait_for_timeout(1000)
