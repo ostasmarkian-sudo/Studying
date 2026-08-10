@@ -61,3 +61,4 @@ This is an educational repository, not a production-ready application. Some file
 ## Author
 
 [ostasmarkian-sudo](https://github.com/ostasmarkian-sudo)
+# Web-Scrapers
