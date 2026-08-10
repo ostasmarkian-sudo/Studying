@@ -15,9 +15,6 @@ with sync_playwright() as playwright:
         page.goto("https://ksd.ua/", wait_until="domcontentloaded")
 
         page.on("response", show_response)
-
-        search = page.get_by_placeholder("Пошук в КСД").last
-        search.fill("Відьмак")
-        search.press("Enter")
-
+        page.locator("//input[@id='_R_19h8qelb_']").click()
+        main_placeholder = page.locator("//input[@id='_r_0_']")
         page.wait_for_timeout(5000)
