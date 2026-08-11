@@ -17,4 +17,5 @@ with sync_playwright() as playwright:
         page.on("response", show_response)
         page.locator("//input[@id='_R_19h8qelb_']").click()
         main_placeholder = page.locator("//input[@id='_r_0_']")
+        main_placeholder.click()
         page.wait_for_timeout(5000)
