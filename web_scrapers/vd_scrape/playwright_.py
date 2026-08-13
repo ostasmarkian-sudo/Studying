@@ -3,9 +3,13 @@ from pathlib import Path
 import asyncio
 import random
 import re
-from filter import filter_data
+from lzstring import LZString
+import json
+import math
 
 queue = asyncio.Queue()
+statequeue = asyncio.Queue()
+lz = LZString()
 
 
 async def handle_response(response, queue):
@@ -22,7 +26,23 @@ async def handle_response(response, queue):
         return
     print("URL:", response.url)
     data = await response.json()
+    fetch_url_i = response.url
+    ma = re.search(
+        r"(^(?P<endpoint>https:\/\/www.digikey.com\/products\/api\/v5\/filter-page\/\d+\?)s=(?P<page_state>.+))$",
+        fetch_url_i,
+    )
+    fetch_url_o = ma.group("page_state")
+    endpoint = ma.group("endpoint")
+    product_count = int(data["data"]["commonFilters"][0]["options"][0]["productCount"])
+    request_headers = await response.request.all_headers()
+
+    locale_headers = {
+        name: value
+        for name, value in request_headers.items()
+        if name.lower() in {"site", "lang", "x-currency"}
+    }
     await queue.put(data)
+    await statequeue.put((fetch_url_o, product_count, endpoint, locale_headers))
 
 
 profile_path = Path(__file__).parent / "browser_profile"
@@ -48,18 +68,54 @@ async def open_w(swap_pages, queue):
             await page.mouse.move(x_R, y_R, steps=random.randint(15, 40))
             await reg_fetch.click()
             await page.wait_for_timeout(random.randint(100, 400))
-            next_page_button = page.get_by_role("button", name="Next Page")
-            last_page_button = page.get_by_role("button", name="Last Page")
-            cords_lpb = await last_page_button.bounding_box()
-            x_L = cords_lpb["x"] + cords_lpb["width"] / 2
-            y_L = cords_lpb["y"] + cords_lpb["height"] / 2
-            await page.mouse.move(x_L, y_L, steps=random.randint(15, 40))
-            await last_page_button.click()
-            currently_page = page.locator('button[tabindex="-1"]')
-            max_page = int(await currently_page.inner_text())
-            all_page_buttons = page.locator('button[data-testid^="btn-page-"]')
-            for i in range(max_page - 1, 1, -1):
-                print(i)
-            await page.wait_for_timeout(10000)
+            state, product_count, endpoint, locale_headers = await statequeue.get()
+            page_count = math.ceil(product_count / 100)
+            decode_state = lz.decompressFromEncodedURIComponent(state)
+            decode_j = json.loads(decode_state)
+            for i in range(2, page_count + 1):
+                decode_j["5"]["p"] = i
+                decode_j["5"]["pp"] = 100
+                compact_json = json.dumps(
+                    decode_j,
+                    separators=(",", ":"),
+                    ensure_ascii=False,
+                )
+                fetch_key = lz.compressToEncodedURIComponent(compact_json)
+                print(fetch_key)
+                print(lz.decompressFromEncodedURIComponent(fetch_key))
+                fetch_url = f"{endpoint}s={fetch_key}"
+                result = await page.evaluate(
+                    """
+                    async ({url, localeHeaders}) => {
+                        const response = await fetch(url, {
+                            method: "GET",
+                            credentials: "include",
+                            headers: {
+                                "Accept": "application/json, text/plain, */*",
+                                ...localeHeaders
+                            },
+                            referrer: window.location.href
+                        });
+
+                        const body = await response.text();
+
+                        if (!response.ok) {
+                            throw new Error(
+                                `DigiKey returned ${response.status}: ${body.slice(0, 500)}`
+                            );
+                        }
+
+                        return JSON.parse(body);
+                    }
+                    """,
+                    {
+                        "url": fetch_url,
+                        "localeHeaders": locale_headers,
+                    },
+                )
+
+                await queue.put(result)
+
+            await page.wait_for_timeout(random.randint(800, 1600))
         await context.close()
         await queue.put(None)
