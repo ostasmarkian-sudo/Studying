@@ -1,16 +1,16 @@
-from playwright_ import open_w
+from playwright_ import open_w, get_url
 from filter import filter_data
 from db import data_recording
 import asyncio
 
 queue = asyncio.Queue()
 db_queue = asyncio.Queue()
-urls = [
-    "https://www.digikey.com/en/products/filter/controllers/cable-assemblies/823?s=N4IgjCBcoLQExVAYygFwE4FcCmAaEA9lANogCsIAugL7X4XQgAOUY%2BTLkYADN7UA",
-    "https://www.digikey.com/en/products/filter/controllers/controller-accessories/816?s=N4IgjCBcoLQExVAYygFwE4FcCmAaEA9lANogCsIAugL7X4XQgAOUY%2BTLkYADN7UA",
-    "https://www.digikey.com/en/products/filter/controllers/liquid-level/806?s=N4IgjCBcoLQExVAYygFwE4FcCmAaEA9lANogCsIAugL61A",
-    "https://www.digikey.com/en/products/filter/controllers/plc-modules/821?s=N4IgjCBcoLQExVAYygFwE4FcCmAaEA9lANogCsIAugL61A",
-]
+urlqueus = asyncio.Queue()
+
+
+async def open_s(urlqueus, queue):
+    urls = await urlqueus.get()
+    await open_w(urls, queue)
 
 
 async def process_data(queue, db_queue):
@@ -35,9 +35,9 @@ async def record_data(db_queue):
 
 
 async def main():
-
     async with asyncio.TaskGroup() as tg:
-        tg.create_task(open_w(urls, queue))
+        tg.create_task(get_url(urlqueus))
+        tg.create_task(open_s(urlqueus, queue))
         tg.create_task(process_data(queue, db_queue))
         tg.create_task(record_data(db_queue))
 

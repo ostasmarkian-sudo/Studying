@@ -4,6 +4,7 @@ import asyncio
 from decimal import Decimal
 
 queue = asyncio.Queue()
+db_queue = asyncio.Queue()
 
 
 @dataclass
@@ -57,4 +58,4 @@ async def filter_data(data):
             package=package,
         )
         filtered_products.append(filtered_product)
-    await queue.put(filtered_products)
+    await db_queue.put(filtered_products)
