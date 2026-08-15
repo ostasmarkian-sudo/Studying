@@ -3,9 +3,6 @@ import re
 import asyncio
 from decimal import Decimal
 
-queue = asyncio.Queue()
-db_queue = asyncio.Queue()
-
 
 @dataclass
 class Product:
@@ -18,7 +15,7 @@ class Product:
     package: str
 
 
-async def filter_data(data):
+def filter_data(data):
     filtered_products = []
     products = data["data"]["products"]
     for product in products:
@@ -38,7 +35,10 @@ async def filter_data(data):
             except:
                 company = None
         product_id = str(product[0]["value"]["productId"])
-        product_count = product[2]["value"][0]["quantity"]
+        try:
+            product_count = product[2]["value"][0]["quantity"]
+        except:
+            product_count = None
         product_count = int(product_count.replace(",", ""))
         try:
             series = str(product[5]["value"]["label"])
@@ -51,11 +51,11 @@ async def filter_data(data):
         filtered_product = Product(
             product_id=product_id,
             name=name,
-            price=price,
             company=company,
-            product_count=product_count,
             series=series,
+            price=price,
+            product_count=product_count,
             package=package,
         )
         filtered_products.append(filtered_product)
-    await db_queue.put(filtered_products)
+        return filtered_products

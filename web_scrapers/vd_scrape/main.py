@@ -2,6 +2,7 @@ from playwright_ import open_w, get_url
 from filter import filter_data
 from db import data_recording
 import asyncio
+import selectors
 
 queue = asyncio.Queue()
 db_queue = asyncio.Queue()
@@ -21,8 +22,8 @@ async def process_data(queue, db_queue):
             await db_queue.put(None)
             break
 
-        clear_data = await filter_data(data)
-        await db_queue.put(clear_data)
+        filtered_data = filter_data(data)
+        await db_queue.put(filtered_data)
 
 
 async def record_data(db_queue):
@@ -42,4 +43,7 @@ async def main():
         tg.create_task(record_data(db_queue))
 
 
-asyncio.run(main())
+asyncio.run(
+    main(),
+    loop_factory=lambda: asyncio.SelectorEventLoop(selectors.SelectSelector()),
+)

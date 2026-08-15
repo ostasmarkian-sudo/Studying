@@ -1,4 +1,4 @@
-from patchright.async_api import async_playwright, expect
+from patchright.async_api import async_playwright
 from pathlib import Path
 import asyncio
 import random
@@ -97,8 +97,8 @@ async def open_w(urlqueus, queue):
             x_R = cords_reg["x"] + cords_reg["width"] / 2
             y_R = cords_reg["y"] + cords_reg["height"] / 2
             await page.mouse.move(
-                x_R * random.randint(0.98, 1.02),
-                y_R * random.randint(0.98, 1.02),
+                x_R,
+                y_R,
                 steps=random.randint(15, 40),
             )
             await reg_fetch.click()
