@@ -38,10 +38,14 @@ Desktop.ini
 # Temporary files
 *.tmp
 *.bak
+
+# Project-specific local data and generated files
 sqlite/data/library.db
-.git-backup/
-Ff+watermark.jpg
-input.jpg
-.jpg
-config.py
-browser_profile
+tg bots/.git-backup/
+tg bots/input.jpg
+tg bots/*+watermark.jpg
+web_scrapers/vd_scrape/browser_profile/
+
+# Local project configuration files containing secrets
+small projects/config.py
+website monitoring/config.py
