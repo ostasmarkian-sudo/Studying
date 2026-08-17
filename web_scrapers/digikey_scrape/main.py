@@ -43,7 +43,4 @@ async def main():
         tg.create_task(record_data(db_queue))
 
 
-asyncio.run(
-    main(),
-    loop_factory=lambda: asyncio.SelectorEventLoop(selectors.SelectSelector()),
-)
+asyncio.run(main())

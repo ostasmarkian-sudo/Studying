@@ -44,8 +44,8 @@ sqlite/data/library.db
 tg bots/.git-backup/
 tg bots/input.jpg
 tg bots/*+watermark.jpg
-web_scrapers/vd_scrape/browser_profile/
-
+web_scrapers/digikey_scrape/browser_profile_digikey/
+web_scrapers/avnet_scrape/browser_profile_avnet
 # Local project configuration files containing secrets
 small projects/config.py
 website monitoring/config.py

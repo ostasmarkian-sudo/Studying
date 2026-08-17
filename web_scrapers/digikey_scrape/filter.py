@@ -58,4 +58,4 @@ def filter_data(data):
             package=package,
         )
         filtered_products.append(filtered_product)
-        return filtered_products
+    return filtered_products

@@ -7,15 +7,17 @@ from lzstring import LZString
 import json
 import math
 from urllib.parse import unquote
+import time
 
 queue = asyncio.Queue()
 statequeue = asyncio.Queue()
 urlqueus = asyncio.Queue()
 lz = LZString()
-profile_path = Path(__file__).parent / "browser_profile"
+profile_path = Path(__file__).parent / "browser_profile_digikey"
 
 
 async def get_url(urlqueus):
+
     async with async_playwright() as playwright:
         browser = await playwright.chromium.launch_persistent_context(
             user_data_dir=str(profile_path), headless=False
@@ -86,6 +88,7 @@ async def open_w(urlqueus, queue):
         )
         page = await context.new_page()
         for url in urlqueus:
+            start = time.perf_counter()
             url_d = "https://www.digikey.com/" + url
             page.on("response", handle_r)
             await page.goto(
@@ -124,28 +127,28 @@ async def open_w(urlqueus, queue):
                 fetch_url = f"{endpoint}s={fetch_key}"
                 result = await page.evaluate(
                     """
-                    async ({url, localeHeaders}) => {
-                        const response = await fetch(url, {
-                            method: "GET",
-                            credentials: "include",
-                            headers: {
-                                "Accept": "application/json, text/plain, */*",
-                                ...localeHeaders
-                            },
-                            referrer: window.location.href
-                        });
+                        async ({url, localeHeaders}) => {
+                            const response = await fetch(url, {
+                                method: "GET",
+                                credentials: "include",
+                                headers: {
+                                    "Accept": "application/json, text/plain, */*",
+                                    ...localeHeaders
+                                },
+                                referrer: window.location.href
+                            });
 
-                        const body = await response.text();
+                            const body = await response.text();
 
-                        if (!response.ok) {
-                            throw new Error(
-                                `DigiKey returned ${response.status}: ${body.slice(0, 500)}`
-                            );
+                            if (!response.ok) {
+                                throw new Error(
+                                    `DigiKey returned ${response.status}: ${body.slice(0, 500)}`
+                                );
+                            }
+
+                            return JSON.parse(body);
                         }
-
-                        return JSON.parse(body);
-                    }
-                    """,
+                        """,
                     {
                         "url": fetch_url,
                         "localeHeaders": locale_headers,
@@ -153,6 +156,7 @@ async def open_w(urlqueus, queue):
                 )
                 print(i)
                 await queue.put(result)
-
+                end = time.perf_counter() - start
+                print(end)
         await context.close()
         await queue.put(None)
