@@ -34,8 +34,6 @@ async def creating_links():
                     "main_label": "Category",
                 }
             }
-            selection = decode["Categories"]["selection"]
-            selection[0]["value"] = "Other Audio & Video Connectors"
             compact_json = json.dumps(
                 decode,
                 separators=(",", ":"),
