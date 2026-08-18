@@ -37,9 +37,9 @@ def filter_data(data):
         product_id = str(product[0]["value"]["productId"])
         try:
             product_count = product[2]["value"][0]["quantity"]
+            product_count = int(product_count.replace(",", ""))
         except:
             product_count = None
-        product_count = int(product_count.replace(",", ""))
         try:
             series = str(product[5]["value"]["label"])
         except:

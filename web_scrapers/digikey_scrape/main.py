@@ -2,16 +2,18 @@ from playwright_ import open_w, get_url
 from filter import filter_data
 from db import data_recording
 import asyncio
-import selectors
+from patchright.async_api import async_playwright
+from pathlib import Path
 
+profile_path = Path(__file__).parent / "browser_profile_digikey"
 queue = asyncio.Queue()
 db_queue = asyncio.Queue()
 urlqueus = asyncio.Queue()
 
 
-async def open_s(urlqueus, queue):
+async def open_s(urlqueus, queue, page):
     urls = await urlqueus.get()
-    await open_w(urls, queue)
+    await open_w(urls, queue, page)
 
 
 async def process_data(queue, db_queue):
@@ -36,11 +38,17 @@ async def record_data(db_queue):
 
 
 async def main():
-    async with asyncio.TaskGroup() as tg:
-        tg.create_task(get_url(urlqueus))
-        tg.create_task(open_s(urlqueus, queue))
-        tg.create_task(process_data(queue, db_queue))
-        tg.create_task(record_data(db_queue))
+    async with async_playwright() as playwright:
+        context = await playwright.chromium.launch_persistent_context(
+            user_data_dir=str(profile_path), headless=False
+        )
+        page = await context.new_page()
+        async with asyncio.TaskGroup() as tg:
+            tg.create_task(get_url(urlqueus, page))
+            tg.create_task(open_s(urlqueus, queue, page))
+            tg.create_task(process_data(queue, db_queue))
+            tg.create_task(record_data(db_queue))
+        await context.close()
 
 
 asyncio.run(main())
