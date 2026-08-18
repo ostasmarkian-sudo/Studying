@@ -48,3 +48,5 @@ web_scrapers/digikey_scrape/browser_profile_digikey/
 # Local project configuration files containing secrets
 small projects/config.py
 website monitoring/config.py
+C:/Users/marki/Documents/Studying Projects/web_scrapers/avnet_scrape/products
+C:/Users/marki/Documents\Studying Projects/web_scrapers/avnet_scrape/browser_profile_avnet
