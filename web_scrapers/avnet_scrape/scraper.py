@@ -4,7 +4,7 @@ import json
 import sys
 import urllib.parse
 from pathlib import Path
-
+import re
 import aiohttp
 import db
 from patchright.async_api import async_playwright
@@ -13,9 +13,7 @@ profile_path = Path(__file__).parent / "browser_profile_avnet"
 categories_path = Path(__file__).parent / "categories.json"
 
 API_URL = "https://apigw.avnet.com/external/fspmicro-application/api/application/product/search"
-BATCH_SIZE = 2000  # sweet spot found by benchmarking API's own "top" param: ~500-600 items/s
-                    # plateau between 2k-10k; below 2k per-request overhead dominates, above
-                    # ~20k response time balloons non-linearly and requests start timing out.
+BATCH_SIZE = 2000
 
 
 async def creating_links(page):
@@ -39,7 +37,9 @@ def category_page_url(href, name):
             "main_label": "Category",
         }
     }
-    compact_json = json.dumps(decode, separators=(",", ":"), ensure_ascii=False).encode()
+    compact_json = json.dumps(
+        decode, separators=(",", ":"), ensure_ascii=False
+    ).encode()
     encode = base64.b64encode(compact_json).decode()
     go = urllib.parse.quote(encode, safe="")
     return f"https://my.avnet.com/{href.lstrip('/')}?go={go}&page=1&limit=1&orderby=&orderbydirection=asc"
@@ -48,6 +48,16 @@ def category_page_url(href, name):
 def category_filter(name):
     escaped = name.replace("'", "''")
     return f"(Level_2_Name eq '{escaped}') and Sboat eq 'T'"
+
+
+async def block_assets(page):
+    async def handler(route):
+        if route.request.resource_type in {"image", "media", "font"}:
+            await route.abort()
+        else:
+            await route.continue_()
+
+    await page.route("**/*", handler)
 
 
 async def get_api_headers():
@@ -65,17 +75,23 @@ async def get_api_headers():
             user_data_dir=str(profile_path), headless=True
         )
         page = await browser.new_page()
+        await block_assets(page)
         page.on("request", lambda r: asyncio.create_task(on_request(r)))
 
         await page.goto(
             "https://my.avnet.com/abacus/products/c/see-all-products/",
             wait_until="load",
         )
-        catalog = page.locator("ul[class='sublevel2']").locator("li").locator("a")
+        catalog = (
+            page.locator("ul[class='sublevel2']")
+            .locator("li")
+            .filter(has_not=page.locator("ul"))
+            .locator("a")
+        )
         href = await catalog.nth(1).get_attribute("href")
         name = await catalog.nth(1).inner_text()
         await page.goto(category_page_url(href, name), wait_until="load")
-        await page.wait_for_timeout(2000)
+        await page.wait_for_timeout(200)
 
         await page.close()
         await browser.close()
@@ -136,34 +152,30 @@ async def discover_categories(concurrency=8):
             user_data_dir=str(profile_path), headless=True
         )
         page = await browser.new_page()
+        await block_assets(page)
         entries = await creating_links(page)
+        results = []
+        for entry in entries:
+            await page.goto(entry["url"], wait_until="domcontentloaded")
+            if await page.locator('div[class="prod_count2"]').count() > 0:
+                print("skip")
+                continue
+            unf_count_aviable = await page.locator(
+                "span[class='filter-count']"
+            ).first.inner_text()
+            match = re.search(r"\(([\d,\s]+)\)", unf_count_aviable)
+            if not match:
+                continue
+            count_aviable = int(match.group(1).replace(",", "").replace(" ", ""))
+            if count_aviable == 0:
+                continue
+            results.append({**entry, "count": count_aviable})
         await page.close()
         await browser.close()
-
-    headers_holder = {"headers": await get_api_headers()}
-    queue = asyncio.Queue()
-    for entry in entries:
-        queue.put_nowait(entry)
-
-    results = []
-    semaphore = asyncio.Semaphore(concurrency)
-    async with aiohttp.ClientSession() as session:
-        workers = [
-            asyncio.create_task(
-                count_worker(session, headers_holder, queue, results, semaphore)
-            )
-            for _ in range(concurrency)
-        ]
-        await queue.join()
-        for w in workers:
-            w.cancel()
-        await asyncio.gather(*workers, return_exceptions=True)
-
-    non_empty = [r for r in results if r["count"] > 0]
-    categories_path.write_text(
-        json.dumps(non_empty, indent=2, ensure_ascii=False), encoding="utf-8"
-    )
-    print(f"saved {len(non_empty)} categories to {categories_path} ({len(results) - len(non_empty)} empty skipped)")
+        categories_path.write_text(
+            json.dumps(results, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
+        print(f"saved {len(results)} categories to {categories_path})")
 
 
 async def fetch_category(session, headers_holder, entry, semaphore):
@@ -189,6 +201,8 @@ async def fetch_category(session, headers_holder, entry, semaphore):
         if not data or not data.get("IsSuccessFull"):
             error = data.get("ErrorMessage") if data else "request failed"
             print(f"error fetching {entry['name']} skip={skip}: {error}")
+            continue
+        if data.get("Stock") == 0:
             continue
         batch = data["Data"]["Products"]
         await db.save_products(entry["name"], batch)
