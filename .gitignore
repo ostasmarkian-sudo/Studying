@@ -52,3 +52,4 @@ web_scrapers/avnet_scrape/products
 web_scrapers/avnet_scrape/browser_profile_avnet
 browser_profile_avnet
 web_scrapers/avnet_scrape/browser_profile_avnet
+web_scrapers/avnet_scrape/categories.json

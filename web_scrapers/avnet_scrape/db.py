@@ -1,4 +1,7 @@
 import asyncio
+import hashlib
+import json
+from datetime import date
 from pathlib import Path
 
 import psycopg
@@ -14,6 +17,304 @@ DATABASE_CONNECTION = {
 
 SCHEMA_PATH = Path(__file__).parent / "schema.sql"
 
+DROP_ALWAYS = frozenset(
+    {
+        "Type",
+        "Sboat",
+        "ERPSystemName",
+        "DivisionCodeName",
+        "DeleteFlag",
+        "Published",
+        "WebCode",
+        "PIMBlock",
+        "DesignIds",
+        "AllocationFlag",
+        "FactoryLeadTime",
+        "NPIFlag",
+        "SoftwareFlag",
+        "ITARFlag",
+        "MilitaryProductFlag",
+        "PackageSizeMandatoryFlag",
+        "IsDesignsAvailable",
+        "@search.score",
+        "sys_update_dt",
+        "sys_delta_dt",
+        "ItemRowNumber",
+        "ERPPartCreateDate",  # == ActiveDate
+        "Structuregroupidentifier",  # == deepest Level_N_ID
+        "ImagePath",
+        "ThumbnailPath",
+        "AssetPath",
+        "AssetURL",
+    }
+)
+
+PROMOTED = frozenset(
+    {
+        "ItemNumber",
+        "ERPPartNumber",
+        "WCSPartNumber",
+        "VariantNumber",
+        "ManufacturerCode",
+        "ManufacturerName",
+        "ERPManufacturerCode",
+        "ERPSupplierCode",
+        "ManufacturerPartNumber",
+        "ERPMFRPartNumber",
+        "VendorPartNumber",
+        "Level_1_Name",
+        "Level_2_Name",
+        "Level_3_Name",
+        "Level_4_Name",
+        "SAPMatgroup",
+        "Instock",
+        "Stock",
+        "QtyMin",
+        "QtyMult",
+        "Werks",
+        "PackagingTypeCode",
+        "ERPProductStatus",
+        "ActiveDate",
+        "ObsoleteFlag",
+        "EndofLifeFlag",
+        "LifeCycleRisk",
+        "SupplyChainRisk",
+        "EnvironmentalRisk",
+        "ROHSCompliantCode",
+        "ReachCompliantFlag",
+        "HTSCode",
+        "ECCNCode",
+        "ShortDescription",
+        "LongDescription",
+        "ManufacturerDatasheetURL",
+        "IHSManufacturerDatasheetURL",
+        "Attributes",
+    }
+)
+
+COLUMNS = (
+    "item_number",
+    "erp_part_number",
+    "wcs_part_number",
+    "variant_number",
+    "mfr_code",
+    "mfr_name",
+    "erp_mfr_code",
+    "erp_supplier_code",
+    "mpn",
+    "erp_mfr_part",
+    "vendor_part",
+    "cat_l1",
+    "cat_l2",
+    "cat_l3",
+    "cat_l4",
+    "sap_matgroup",
+    "in_stock",
+    "stock",
+    "qty_min",
+    "qty_mult",
+    "warehouse",
+    "packaging",
+    "erp_status",
+    "price",
+    "active_date",
+    "obsolete",
+    "eol",
+    "lifecycle_risk",
+    "supply_risk",
+    "env_risk",
+    "rohs_code",
+    "reach_compliant",
+    "hts_code",
+    "eccn_code",
+    "short_description",
+    "long_description",
+    "datasheet_url",
+    "ihs_datasheet_url",
+    "attrs",
+    "attr_ranges",
+    "raw",
+    "data_hash",
+)
+
+
+def _assignment(column):
+    # price does not come from the search API, so an upsert must never blank out
+    # a price that some other job has already filled in.
+    if column == "price":
+        return "price = COALESCE(EXCLUDED.price, products.price)"
+    return f"{column} = EXCLUDED.{column}"
+
+
+# item_number is the conflict key and first_seen_at must survive updates, so
+# neither is reassigned here.
+UPSERT_SQL = """
+    INSERT INTO products ({columns})
+    VALUES ({placeholders})
+    ON CONFLICT (item_number) DO UPDATE SET
+        {assignments},
+        updated_at = now()
+    WHERE products.data_hash IS DISTINCT FROM EXCLUDED.data_hash
+""".format(
+    columns=", ".join(COLUMNS),
+    placeholders=", ".join(["%s"] * len(COLUMNS)),
+    assignments=",\n        ".join(
+        _assignment(column) for column in COLUMNS if column != "item_number"
+    ),
+)
+
+# The upsert above skips rows whose payload is unchanged, so "this part was
+# still in the catalog on this run" is recorded separately, in a narrow table
+# where rewriting every row per run stays cheap (see schema.sql).
+SEEN_SQL = """
+    INSERT INTO products_seen (item_number, last_seen_at)
+    SELECT unnest(%s::text[]), now()
+    ON CONFLICT (item_number) DO UPDATE SET last_seen_at = now()
+"""
+
+
+def _text(value):
+    if value is None:
+        return None
+    value = str(value).strip()
+    return value or None
+
+
+def _int(value):
+    if value is None or value == "":
+        return None
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return None
+
+
+def _num(value):
+    if value is None or value == "":
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _bool(value):
+    """Avnet spells booleans as Yes/No, Y/N or true/false depending on field."""
+    if value is None or value == "":
+        return None
+    return str(value).strip().lower() in {"yes", "y", "true", "1"}
+
+
+def _date(value):
+    # "1999-09-11T00:00:00Z" -> date(1999, 9, 11)
+    text = _text(value)
+    if not text:
+        return None
+    try:
+        return date.fromisoformat(text[:10])
+    except ValueError:
+        return None
+
+
+def clean_product(product):
+    """Split one API product into (leftover raw, attrs, attr_ranges).
+
+    Attributes arrive as a list of six-key objects where ATTCOMBO is always
+    ATTRNAME|#|ATTRVAL and MINVAL == MAXVAL for 98.5% of them, so folding them
+    into a flat mapping drops most of the payload without losing anything.
+    """
+    attrs, ranges = {}, {}
+    for attribute in product.get("Attributes") or []:
+        name = attribute.get("ATTRNAME")
+        if not name:
+            continue
+        attrs[name] = attribute.get("ATTRVAL")
+        if attribute.get("MINVAL") != attribute.get("MAXVAL"):
+            ranges[name] = {
+                "min": attribute.get("MINVAL"),
+                "max": attribute.get("MAXVAL"),
+            }
+
+    raw = {
+        key: value
+        for key, value in product.items()
+        if key not in DROP_ALWAYS
+        and key not in PROMOTED
+        and value is not None
+        and value != ""
+        and value != []
+    }
+    return raw, attrs, (ranges or None)
+
+
+def _hash(product, attrs, ranges):
+    """Fingerprint of everything we store, with the volatile fields removed.
+
+    Computed over the folded attributes rather than the original array so that
+    reordering or a changed relevance score does not register as a change.
+    """
+    payload = {key: value for key, value in product.items() if key not in DROP_ALWAYS}
+    payload["Attributes"] = attrs
+    payload["AttributeRanges"] = ranges
+    canonical = json.dumps(
+        payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False, default=str
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).digest()
+
+
+def build_row(product, category=None):
+    """Map one API product onto COLUMNS, in order."""
+    raw, attrs, ranges = clean_product(product)
+    values = {
+        "item_number": _text(product.get("ItemNumber")),
+        "erp_part_number": _text(product.get("ERPPartNumber")),
+        "wcs_part_number": _text(product.get("WCSPartNumber")),
+        "variant_number": _text(product.get("VariantNumber")),
+        "mfr_code": _text(product.get("ManufacturerCode")),
+        "mfr_name": _text(product.get("ManufacturerName")),
+        "erp_mfr_code": _text(product.get("ERPManufacturerCode")),
+        "erp_supplier_code": _text(product.get("ERPSupplierCode")),
+        "mpn": _text(product.get("ManufacturerPartNumber")),
+        "erp_mfr_part": _text(product.get("ERPMFRPartNumber")),
+        "vendor_part": _text(product.get("VendorPartNumber")),
+        "cat_l1": _text(product.get("Level_1_Name")),
+        # the payload matched the requested category in all 29 444 rows, so the
+        # name we asked for is only a fallback
+        "cat_l2": _text(product.get("Level_2_Name")) or _text(category),
+        "cat_l3": _text(product.get("Level_3_Name")),
+        "cat_l4": _text(product.get("Level_4_Name")),
+        "sap_matgroup": _text(product.get("SAPMatgroup")),
+        "in_stock": bool(_bool(product.get("Instock"))),
+        "stock": _int(product.get("Stock")),
+        "qty_min": _int(product.get("QtyMin")),
+        "qty_mult": _int(product.get("QtyMult")),
+        "warehouse": _text(product.get("Werks")),
+        "packaging": _text(product.get("PackagingTypeCode")),
+        "erp_status": _text(product.get("ERPProductStatus")),
+        # never present in the search API today; here for the separate price
+        # source that will fill it in
+        "price": _num(product.get("Price")),
+        "active_date": _date(product.get("ActiveDate")),
+        "obsolete": _bool(product.get("ObsoleteFlag")),
+        "eol": _bool(product.get("EndofLifeFlag")),
+        "lifecycle_risk": _text(product.get("LifeCycleRisk")),
+        "supply_risk": _text(product.get("SupplyChainRisk")),
+        "env_risk": _text(product.get("EnvironmentalRisk")),
+        "rohs_code": _text(product.get("ROHSCompliantCode")),
+        "reach_compliant": _bool(product.get("ReachCompliantFlag")),
+        "hts_code": _text(product.get("HTSCode")),
+        "eccn_code": _text(product.get("ECCNCode")),
+        "short_description": _text(product.get("ShortDescription")),
+        "long_description": _text(product.get("LongDescription")),
+        "datasheet_url": _text(product.get("ManufacturerDatasheetURL")),
+        "ihs_datasheet_url": _text(product.get("IHSManufacturerDatasheetURL")),
+        "attrs": Jsonb(attrs),
+        "attr_ranges": Jsonb(ranges) if ranges else None,
+        "raw": Jsonb(raw),
+        "data_hash": _hash(product, attrs, ranges),
+    }
+    return tuple(values[column] for column in COLUMNS)
+
 
 def _init_db_sync():
     with psycopg.connect(**DATABASE_CONNECTION) as connection:
@@ -28,39 +329,19 @@ async def init_db():
 
 
 def _save_products_sync(category, products):
-    rows = [
-        (
-            product["ItemNumber"],
-            product.get("ManufacturerPartNumber"),
-            product.get("ManufacturerName"),
-            category,
-            product.get("Stock"),
-            # Avnet's product/search API doesn't return pricing for an unauthenticated
-            # account (product pages show "SIGN IN TO SEE YOUR ABACUS PRICE"); column
-            # stays NULL until we scrape through a logged-in session that gets pricing.
-            None,
-            Jsonb(product),
-        )
-        for product in products
-    ]
+    rows, item_numbers = [], []
+    for product in products:
+        if not product.get("ItemNumber") or not product.get("ERPPartNumber"):
+            continue
+        rows.append(build_row(product, category))
+        item_numbers.append(product["ItemNumber"])
+    if not rows:
+        return
+
     with psycopg.connect(**DATABASE_CONNECTION) as connection:
         with connection.cursor() as cursor:
-            cursor.executemany(
-                """
-                INSERT INTO products (item_number, manufacturer_part_number, manufacturer_name, category, quantity, price, data)
-                VALUES (%s, %s, %s, %s, %s, %s, %s)
-                ON CONFLICT (item_number) DO UPDATE SET
-                    manufacturer_part_number = EXCLUDED.manufacturer_part_number,
-                    manufacturer_name = EXCLUDED.manufacturer_name,
-                    category = EXCLUDED.category,
-                    quantity = EXCLUDED.quantity,
-                    price = EXCLUDED.price,
-                    data = EXCLUDED.data,
-                    updated_at = now()
-                WHERE products.data IS DISTINCT FROM EXCLUDED.data
-                """,
-                rows,
-            )
+            cursor.executemany(UPSERT_SQL, rows)
+            cursor.execute(SEEN_SQL, (item_numbers,))
 
 
 async def save_products(category, products):
