@@ -27,7 +27,9 @@ CREATE TABLE IF NOT EXISTS products (
 
     -- category
     cat_l1            text NOT NULL,
-    cat_l2            text NOT NULL,
+    -- 1 462 of the 30 880 in-stock parts carry no Level_2_Name at all; only
+    -- fetch_products' fallback to the requested category name hid that.
+    cat_l2            text,
     cat_l3            text,
     cat_l4            text,
     sap_matgroup      text,
@@ -81,6 +83,9 @@ CREATE TABLE IF NOT EXISTS products (
     first_seen_at     timestamptz NOT NULL DEFAULT now(),
     updated_at        timestamptz NOT NULL DEFAULT now()
 );
+
+-- for databases created before cat_l2 was allowed to be NULL
+ALTER TABLE products ALTER COLUMN cat_l2 DROP NOT NULL;
 
 ALTER TABLE products SET (autovacuum_vacuum_scale_factor = 0.02);
 

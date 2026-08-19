@@ -159,7 +159,6 @@ REQUIRED_COLUMNS = tuple(
         "mfr_name",
         "mpn",
         "cat_l1",
-        "cat_l2",
     )
 )
 
@@ -363,6 +362,17 @@ async def init_db():
     await asyncio.to_thread(_init_db_sync)
 
 
+def _constraint(error):
+    return error.diag.constraint_name or type(error).__name__
+
+
+def _upsert(cursor, rows, item_numbers):
+    cursor.executemany(UPSERT_SQL, rows)
+    written = cursor.rowcount
+    cursor.execute(SEEN_SQL, (item_numbers,))
+    return written
+
+
 def _save_products_sync(category, products):
     rows, item_numbers, skipped = [], [], []
     for product in products:
@@ -373,10 +383,10 @@ def _save_products_sync(category, products):
             continue
         rows.append(row)
         item_numbers.append(row[0])
-    if skipped:
-        print(f"  {category}: skipped {len(skipped)}, first {skipped[0]}")
     if not rows:
-        return 0
+        if skipped:
+            print(f"  {category}: skipped {len(skipped)}, first {skipped[0]}")
+        return 0, len(skipped)
 
     # SEEN_SQL is one INSERT ... ON CONFLICT and Postgres refuses to let a single
     # statement touch the same row twice, so a repeated ItemNumber inside one
@@ -385,15 +395,59 @@ def _save_products_sync(category, products):
 
     with psycopg.connect(**DATABASE_CONNECTION) as connection:
         with connection.cursor() as cursor:
-            cursor.executemany(UPSERT_SQL, rows)
-            written = cursor.rowcount
-            cursor.execute(SEEN_SQL, (item_numbers,))
-    return written
+            try:
+                with connection.transaction():
+                    written = _upsert(cursor, rows, item_numbers)
+            except psycopg.errors.IntegrityError as error:
+                # erp_part_number is UNIQUE while the upsert only knows how to
+                # resolve conflicts on item_number, so one part that reuses
+                # another's ERPPartNumber would otherwise roll back all 2000
+                # rows of the batch. Replay them one at a time (a savepoint
+                # each) and lose only the offenders.
+                print(
+                    f"  {category}: batch rejected ({_constraint(error)}),"
+                    " replaying row by row"
+                )
+                written = 0
+                for row in rows:
+                    try:
+                        with connection.transaction():
+                            written += _upsert(cursor, [row], [row[0]])
+                    except psycopg.errors.IntegrityError as row_error:
+                        skipped.append(f"{row[0]} [{_constraint(row_error)}]")
+    if skipped:
+        print(f"  {category}: skipped {len(skipped)}, first {skipped[0]}")
+    return written, len(skipped)
 
 
 async def save_products(category, products):
-    """Returns how many rows the upsert actually wrote - unchanged products are
-    skipped by design, so this is always <= len(products)."""
+    """Returns (written, skipped) for one batch.
+
+    `written` counts only rows the upsert actually touched: a product whose
+    payload is byte-for-byte what the table already holds is skipped by the
+    upsert's data_hash guard, so a re-run over an unchanged catalog reports 0
+    written and that is correct, not a failure. products_seen.last_seen_at is
+    still bumped for every one of them.
+    """
     if not products:
-        return 0
+        return 0, 0
     return await asyncio.to_thread(_save_products_sync, category, products)
+
+
+def _run_stats_sync(since):
+    with psycopg.connect(**DATABASE_CONNECTION) as connection:
+        return connection.execute(
+            """
+            SELECT (SELECT count(*) FROM products),
+                   (SELECT count(*) FROM products WHERE first_seen_at >= %s),
+                   (SELECT count(*) FROM products WHERE updated_at >= %s
+                                                    AND first_seen_at < %s),
+                   (SELECT count(*) FROM products_seen WHERE last_seen_at >= %s)
+            """,
+            (since, since, since, since),
+        ).fetchone()
+
+
+async def run_stats(since):
+    """(total rows, inserted this run, updated this run, seen this run)."""
+    return await asyncio.to_thread(_run_stats_sync, since)

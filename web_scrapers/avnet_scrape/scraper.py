@@ -3,6 +3,7 @@ import base64
 import json
 import sys
 import urllib.parse
+from datetime import datetime, timezone
 from pathlib import Path
 import re
 import aiohttp
@@ -15,6 +16,17 @@ categories_path = Path(__file__).parent / "categories.json"
 
 API_URL = "https://apigw.avnet.com/external/fspmicro-application/api/application/product/search"
 BATCH_SIZE = 2000
+
+# What the site itself sends: Sboat is the sales-org scope, without it the same
+# query returns a different (partly non-Abacus) catalog.
+CATALOG_FILTER = "Sboat eq 'T'"
+
+# Availability. This is exactly the site's "In Stock (N)" badge - the number
+# discover_categories records - and it is the difference between 30 880 parts
+# catalog-wide and the 1 182 330 that CATALOG_FILTER alone returns.
+# `Stock gt 0` selects the identical set; Instock is an Edm.String, so `eq true`
+# is a server error and `eq 'Y'` silently matches nothing.
+IN_STOCK_FILTER = "Instock eq 'Yes'"
 
 
 async def creating_links(page):
@@ -51,13 +63,17 @@ def odata_str(value):
     return "'" + value.replace("'", "''") + "'"
 
 
-def category_filter(name):
+def category_filter(name, in_stock=True):
     literal = odata_str(name)
-    return (
+    parts = [
         f"(Level_2_Name eq {literal}"
         f" or Level_3_Name eq {literal}"
-        f" or Level_4_Name eq {literal}) and Sboat eq 'T'"
-    )
+        f" or Level_4_Name eq {literal})",
+        CATALOG_FILTER,
+    ]
+    if in_stock:
+        parts.append(IN_STOCK_FILTER)
+    return " and ".join(parts)
 
 
 async def block_assets(page):
@@ -169,61 +185,125 @@ async def discover_categories():
         print(f"saved {len(results)} categories to {categories_path})")
 
 
-async def fetch_category(session, headers_holder, entry, semaphore, failures):
-    base = category_filter(entry["name"])
-    fetched, written, cursor = 0, 0, None
+async def page_filter(session, headers_holder, base, semaphore, on_batch):
+    """Keyset-page every product matching `base` and hand each batch to on_batch.
+
+    ItemNumber is a fixed-width 'Abacus-NNNNNNNNN' string, so `gt` on it is a
+    stable total order and paging on it needs no `skip` - which matters, because
+    the API rejects skip > 100 000 and a big category has more rows than that.
+
+    Returns (fetched, cursor, error). `cursor` is the last ItemNumber that was
+    stored, so a failed sweep says where it stopped instead of just how far.
+    """
+    fetched, cursor, top = 0, None, BATCH_SIZE
+    while True:
+        filt = base
+        if cursor is not None:
+            filt = f"{base} and ItemNumber gt {odata_str(cursor)}"
+        body = {
+            "filter": filt,
+            "isIncludeCount": False,
+            "search": "",
+            "orderby": "ItemNumber",
+            "orderbydirection": "asc",
+            "skip": 0,
+            "top": top,
+            "isProductImageInclude": False,
+            "isSkipFacets": True,
+        }
+        async with semaphore:
+            data = await post_search(session, headers_holder, body)
+
+        if not data or not data.get("IsSuccessFull"):
+            # A 2000-product response is megabytes; when one keeps timing out,
+            # ask for a smaller slice of the same cursor rather than abandoning
+            # the sweep here - that is what silently truncated Surface Mount
+            # Resistors at exactly 100 000 of its 123 118 rows.
+            if top > BATCH_SIZE // 8:
+                top //= 2
+                continue
+            error = data.get("ErrorMessage") if data else "request failed"
+            return fetched, cursor, error
+
+        batch = (data.get("Data") or {}).get("Products") or []
+        # Stopping on a short batch would trust the API to always fill `top`;
+        # one more request that comes back empty is cheap and cannot truncate.
+        if not batch:
+            return fetched, cursor, None
+        await on_batch(batch)
+        fetched += len(batch)
+        nxt = batch[-1].get("ItemNumber")
+        if not nxt:
+            return fetched, cursor, "no ItemNumber to page on"
+        cursor = nxt
+
+
+async def sweep(session, headers_holder, base, semaphore, category, label, failures):
+    """Run one page_filter sweep into the database and report what it did."""
+    written = skipped = 0
+
+    async def on_batch(batch):
+        nonlocal written, skipped
+        batch_written, batch_skipped = await db.save_products(category, batch)
+        written += batch_written
+        skipped += batch_skipped
+
     try:
-        while True:
-            filt = base
-            if cursor is not None:
-                filt = f"{base} and ItemNumber gt {odata_str(cursor)}"
-            body = {
-                "filter": filt,
-                "isIncludeCount": False,
-                "search": "",
-                "orderby": "ItemNumber",
-                "orderbydirection": "asc",
-                "skip": 0,
-                "top": BATCH_SIZE,
-                "isProductImageInclude": False,
-                "isSkipFacets": True,
-            }
-            async with semaphore:
-                data = await post_search(session, headers_holder, body)
-            if not data or not data.get("IsSuccessFull"):
-                error = data.get("ErrorMessage") if data else "request failed"
-                print(f"error fetching {entry['name']} after {fetched}: {error}")
-                failures.append((entry["name"], fetched))
-                break
-            batch = (data.get("Data") or {}).get("Products") or []
-            if not batch:
-                break
-            written += await db.save_products(entry["name"], batch)
-            fetched += len(batch)
-            cursor = batch[-1].get("ItemNumber")
-            if not cursor:
-                print(
-                    f"error fetching {entry['name']} after {fetched}: no ItemNumber to page on"
-                )
-                failures.append((entry["name"], fetched))
-                break
-            if len(batch) < BATCH_SIZE:
-                break
-    except Exception as error:
-        print(f"error fetching {entry['name']} after {fetched}: {error!r}")
-        failures.append((entry["name"], fetched))
+        fetched, cursor, error = await page_filter(
+            session, headers_holder, base, semaphore, on_batch
+        )
+    except Exception as exception:  # noqa: BLE001 - one category must not kill the run
+        fetched, cursor, error = 0, None, repr(exception)
+
+    if error:
+        print(f"error fetching {label} after {fetched}: {error}")
+        failures.append((label, fetched, cursor))
+
+    # `written` counts rows the upsert actually touched. Everything else was
+    # already in the table byte for byte, which is why a second run of an
+    # unchanged catalog legitimately reports 0 written - see the run summary.
     print(
-        f"{entry['name']}: {fetched} fetched, {written} written (badge {entry['count']})"
+        f"{label}: {fetched} fetched, {written} written, "
+        f"{fetched - written - skipped} unchanged"
+        + (f", {skipped} skipped" if skipped else "")
     )
 
 
+async def fetch_category(session, headers_holder, entry, semaphore, failures):
+    await sweep(
+        session,
+        headers_holder,
+        category_filter(entry["name"]),
+        semaphore,
+        entry["name"],
+        f"{entry['name']} (badge {entry['count']})",
+        failures,
+    )
+
+
+async def report(started_at, failures):
+    total, new, changed, seen = await db.run_stats(started_at)
+    print()
+    print(
+        f"run summary: {seen} parts seen, {new} new, {changed} changed, "
+        f"{seen - new - changed} unchanged; products now holds {total} rows"
+    )
+    if failures:
+        print()
+        print(f"{len(failures)} sweeps failed:")
+        for label, fetched, cursor in failures:
+            print(f"   {label} stopped after {fetched} at {cursor}")
+
+
 async def fetch_products(concurrency=4):
+    """Sweep in-stock parts category by category, from categories.json."""
     if not categories_path.exists():
         print(f"{categories_path} not found, run `python scraper.py discover` first")
         return
 
     await db.init_db()
     entries = json.loads(categories_path.read_text(encoding="utf-8"))
+    started_at = datetime.now(timezone.utc)
     headers_holder = {"headers": await get_api_headers(), "lock": asyncio.Lock()}
     semaphore = asyncio.Semaphore(concurrency)
     failures = []
@@ -238,11 +318,35 @@ async def fetch_products(concurrency=4):
             return_exceptions=True,
         )
 
-    if failures:
-        print()
-        print(f"{len(failures)} pages failed:")
-        for name, fetched in failures:
-            print(f"   {name} stopped after {fetched}")
+    await report(started_at, failures)
+
+
+async def fetch_all():
+    """Sweep the whole in-stock catalog with one filter and no category walk.
+
+    30 880 parts in ~16 requests, against 315 category sweeps that pull the same
+    part once per category it is filed under. Level_2_Name is missing on 1 462
+    of those parts, so cat_l2 stays NULL here instead of borrowing the requested
+    category name the way fetch_products does.
+    """
+    await db.init_db()
+    started_at = datetime.now(timezone.utc)
+    headers_holder = {"headers": await get_api_headers(), "lock": asyncio.Lock()}
+    failures = []
+
+    timeout = aiohttp.ClientTimeout(total=180, connect=30)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        await sweep(
+            session,
+            headers_holder,
+            f"{CATALOG_FILTER} and {IN_STOCK_FILTER}",
+            asyncio.Semaphore(1),
+            None,
+            "in-stock catalog",
+            failures,
+        )
+
+    await report(started_at, failures)
 
 
 async def main():
@@ -251,8 +355,10 @@ async def main():
         await discover_categories()
     elif mode == "fetch":
         await fetch_products()
+    elif mode == "fetch-all":
+        await fetch_all()
     else:
-        print("usage: python scraper.py [discover|fetch]")
+        print("usage: python scraper.py [discover|fetch|fetch-all]")
 
 
 if __name__ == "__main__":
