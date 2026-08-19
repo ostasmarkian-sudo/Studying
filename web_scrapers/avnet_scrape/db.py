@@ -46,6 +46,16 @@ DROP_ALWAYS = frozenset(
         "ThumbnailPath",
         "AssetPath",
         "AssetURL",
+        # presentation-only and not returned consistently: the same part
+        # arrives with them from one category and without from another,
+        # which used to flip data_hash and fabricate empty history versions
+        "Level_1_URL",
+        "Level_2_URL",
+        "Level_3_URL",
+        "Level_4_URL",
+        "ManufacturerURL",
+        "ManufacturerLogo",
+        "TopProducts",
     }
 )
 
@@ -135,6 +145,22 @@ COLUMNS = (
     "attr_ranges",
     "raw",
     "data_hash",
+)
+
+# Columns the schema declares NOT NULL. One offending product would abort the
+# whole executemany (and with it the batch), so they are checked per row and
+# the bad row is skipped and reported instead.
+REQUIRED_COLUMNS = tuple(
+    (column, COLUMNS.index(column))
+    for column in (
+        "item_number",
+        "erp_part_number",
+        "mfr_code",
+        "mfr_name",
+        "mpn",
+        "cat_l1",
+        "cat_l2",
+    )
 )
 
 
@@ -247,15 +273,18 @@ def clean_product(product):
     return raw, attrs, (ranges or None)
 
 
-def _hash(product, attrs, ranges):
-    """Fingerprint of everything we store, with the volatile fields removed.
+def _hash(values):
+    """Fingerprint of exactly the row we store, not of the payload we received.
 
-    Computed over the folded attributes rather than the original array so that
-    reordering or a changed relevance score does not register as a change.
+    Hashing the payload meant a field that lands in no column could still flip
+    the hash, while cat_l2's category fallback - which is not in the payload at
+    all - could change without the hash noticing.
     """
-    payload = {key: value for key, value in product.items() if key not in DROP_ALWAYS}
-    payload["Attributes"] = attrs
-    payload["AttributeRanges"] = ranges
+    payload = {
+        column: (value.obj if isinstance(value, Jsonb) else value)
+        for column, value in values.items()
+        if column != "data_hash"
+    }
     canonical = json.dumps(
         payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False, default=str
     )
@@ -274,7 +303,13 @@ def build_row(product, category=None):
         "mfr_name": _text(product.get("ManufacturerName")),
         "erp_mfr_code": _text(product.get("ERPManufacturerCode")),
         "erp_supplier_code": _text(product.get("ERPSupplierCode")),
-        "mpn": _text(product.get("ManufacturerPartNumber")),
+        # obsolete parts often carry no ManufacturerPartNumber and spell the
+        # same number out only in the ERP/vendor fields (e.g. Molex 22012035)
+        "mpn": (
+            _text(product.get("ManufacturerPartNumber"))
+            or _text(product.get("ERPMFRPartNumber"))
+            or _text(product.get("VendorPartNumber"))
+        ),
         "erp_mfr_part": _text(product.get("ERPMFRPartNumber")),
         "vendor_part": _text(product.get("VendorPartNumber")),
         "cat_l1": _text(product.get("Level_1_Name")),
@@ -311,8 +346,8 @@ def build_row(product, category=None):
         "attrs": Jsonb(attrs),
         "attr_ranges": Jsonb(ranges) if ranges else None,
         "raw": Jsonb(raw),
-        "data_hash": _hash(product, attrs, ranges),
     }
+    values["data_hash"] = _hash(values)
     return tuple(values[column] for column in COLUMNS)
 
 
@@ -329,22 +364,36 @@ async def init_db():
 
 
 def _save_products_sync(category, products):
-    rows, item_numbers = [], []
+    rows, item_numbers, skipped = [], [], []
     for product in products:
-        if not product.get("ItemNumber") or not product.get("ERPPartNumber"):
+        row = build_row(product, category)
+        missing = [column for column, index in REQUIRED_COLUMNS if row[index] is None]
+        if missing:
+            skipped.append(f"{product.get('ItemNumber')} [{', '.join(missing)}]")
             continue
-        rows.append(build_row(product, category))
-        item_numbers.append(product["ItemNumber"])
+        rows.append(row)
+        item_numbers.append(row[0])
+    if skipped:
+        print(f"  {category}: skipped {len(skipped)}, first {skipped[0]}")
     if not rows:
-        return
+        return 0
+
+    # SEEN_SQL is one INSERT ... ON CONFLICT and Postgres refuses to let a single
+    # statement touch the same row twice, so a repeated ItemNumber inside one
+    # response would abort the transaction and take the whole batch with it.
+    item_numbers = list(dict.fromkeys(item_numbers))
 
     with psycopg.connect(**DATABASE_CONNECTION) as connection:
         with connection.cursor() as cursor:
             cursor.executemany(UPSERT_SQL, rows)
+            written = cursor.rowcount
             cursor.execute(SEEN_SQL, (item_numbers,))
+    return written
 
 
 async def save_products(category, products):
+    """Returns how many rows the upsert actually wrote - unchanged products are
+    skipped by design, so this is always <= len(products)."""
     if not products:
-        return
-    await asyncio.to_thread(_save_products_sync, category, products)
+        return 0
+    return await asyncio.to_thread(_save_products_sync, category, products)

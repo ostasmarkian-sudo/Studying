@@ -8,6 +8,7 @@ import re
 import aiohttp
 import db
 from patchright.async_api import async_playwright
+from patchright.async_api import TimeoutError as PlaywrightTimeoutError
 
 profile_path = Path(__file__).parent / "browser_profile_avnet"
 categories_path = Path(__file__).parent / "categories.json"
@@ -23,7 +24,7 @@ async def creating_links(page):
     )
     catalog = page.locator("ul[class='sublevel2']").locator("li").locator("a")
     entries = []
-    for i in range(1, await catalog.count()):
+    for i in range(await catalog.count()):
         href = await catalog.nth(i).get_attribute("href")
         name = await catalog.nth(i).inner_text()
         entries.append({"name": name, "url": category_page_url(href, name)})
@@ -45,9 +46,18 @@ def category_page_url(href, name):
     return f"https://my.avnet.com/{href.lstrip('/')}?go={go}&page=1&limit=1&orderby=&orderbydirection=asc"
 
 
+def odata_str(value):
+    # OData escapes a single quote by doubling it
+    return "'" + value.replace("'", "''") + "'"
+
+
 def category_filter(name):
-    escaped = name.replace("'", "''")
-    return f"(Level_2_Name eq '{escaped}') and Sboat eq 'T'"
+    literal = odata_str(name)
+    return (
+        f"(Level_2_Name eq {literal}"
+        f" or Level_3_Name eq {literal}"
+        f" or Level_4_Name eq {literal}) and Sboat eq 'T'"
+    )
 
 
 async def block_assets(page):
@@ -61,23 +71,12 @@ async def block_assets(page):
 
 
 async def get_api_headers():
-    """Trigger one real category search in the browser and sniff the auth headers
-    (bearer token + subscription key) it sends, so the rest of the run can hit the
-    XHR endpoint directly via aiohttp instead of loading pages."""
-    captured = {}
-
-    async def on_request(request):
-        if "product/search" in request.url and request.method == "POST":
-            captured["headers"] = dict(request.headers)
-
     async with async_playwright() as playwright:
         browser = await playwright.chromium.launch_persistent_context(
             user_data_dir=str(profile_path), headless=True
         )
         page = await browser.new_page()
         await block_assets(page)
-        page.on("request", lambda r: asyncio.create_task(on_request(r)))
-
         await page.goto(
             "https://my.avnet.com/abacus/products/c/see-all-products/",
             wait_until="load",
@@ -90,63 +89,55 @@ async def get_api_headers():
         )
         href = await catalog.nth(1).get_attribute("href")
         name = await catalog.nth(1).inner_text()
-        await page.goto(category_page_url(href, name), wait_until="load")
-        await page.wait_for_timeout(200)
 
-        await page.close()
-        await browser.close()
+        try:
+            async with page.expect_request(
+                lambda r: "product/search" in r.url and r.method == "POST",
+                timeout=30_000,
+            ) as info:
+                await page.goto(category_page_url(href, name), wait_until="commit")
+            headers = dict((await info.value).headers)
+        except PlaywrightTimeoutError:
+            raise RuntimeError(
+                f"no product/search POST on {page.url} - the session in "
+                f"{profile_path.name} has probably expired, re-login with headless=False"
+            ) from None
+        finally:
+            await page.close()
+            await browser.close()
 
-    headers = captured["headers"]
     for key in ("content-length", "host", "connection"):
         headers.pop(key, None)
     return headers
 
 
-async def post_search(session, headers_holder, body):
-    for attempt in range(2):
-        async with session.post(
-            API_URL, headers=headers_holder["headers"], json=body
-        ) as resp:
-            if resp.status == 401 and attempt == 0:
-                headers_holder["headers"] = await get_api_headers()
-                continue
-            if resp.status != 200:
-                return None
-            return await resp.json(content_type=None)
+async def refresh_headers(headers_holder, stale):
+    async with headers_holder["lock"]:
+        if headers_holder["headers"] is stale:
+            headers_holder["headers"] = await get_api_headers()
+
+
+async def post_search(session, headers_holder, body, attempts=4):
+    for attempt in range(attempts):
+        current = headers_holder["headers"]
+        try:
+            async with session.post(API_URL, headers=current, json=body) as resp:
+                if resp.status == 401:
+                    await refresh_headers(headers_holder, current)
+                    continue
+                if resp.status in (429, 500, 502, 503, 504):
+                    delay = float(resp.headers.get("Retry-After", 2**attempt))
+                    await asyncio.sleep(delay)
+                    continue
+                if resp.status != 200:
+                    return None
+                return await resp.json(content_type=None)
+        except (aiohttp.ClientError, asyncio.TimeoutError):
+            await asyncio.sleep(2**attempt)
     return None
 
 
-async def count_worker(session, headers_holder, queue, results, semaphore):
-    while True:
-        entry = await queue.get()
-        try:
-            body = {
-                "filter": category_filter(entry["name"]),
-                "isIncludeCount": True,
-                "search": "",
-                "skip": 0,
-                "top": 1,
-                "isProductImageInclude": False,
-                "isSkipFacets": True,
-            }
-            async with semaphore:
-                data = await post_search(session, headers_holder, body)
-            count = data["Data"]["Count"] if data and data.get("IsSuccessFull") else 0
-            results.append({**entry, "count": count})
-            print(f"{count:>6}  {entry['name']}")
-        except Exception as e:
-            print(f"error on {entry['name']}: {e}")
-        finally:
-            queue.task_done()
-
-
-async def discover_categories(concurrency=8):
-    """Enumerate every category and record its real product count via a direct
-    count-only API call (top=1, isIncludeCount=true) instead of scraping the page's
-    filter-count badge, which was found to show a stale/unrelated number. Run this
-    manually (`python scraper.py discover`) whenever the catalog needs re-indexing;
-    fetch_products reads the resulting categories.json rather than re-walking the
-    site on every run."""
+async def discover_categories():
     async with async_playwright() as playwright:
         browser = await playwright.chromium.launch_persistent_context(
             user_data_dir=str(profile_path), headless=True
@@ -178,61 +169,80 @@ async def discover_categories(concurrency=8):
         print(f"saved {len(results)} categories to {categories_path})")
 
 
-async def fetch_category(session, headers_holder, entry, semaphore):
-    count = entry["count"]
-    if count <= 0:
-        return
-
-    filt = category_filter(entry["name"])
-    saved = 0
-    for skip in range(0, count, BATCH_SIZE):
-        top = min(BATCH_SIZE, count - skip)
-        body = {
-            "filter": filt,
-            "isIncludeCount": False,
-            "search": "",
-            "skip": skip,
-            "top": top,
-            "isProductImageInclude": False,
-            "isSkipFacets": True,
-        }
-        async with semaphore:
-            data = await post_search(session, headers_holder, body)
-        if not data or not data.get("IsSuccessFull"):
-            error = data.get("ErrorMessage") if data else "request failed"
-            print(f"error fetching {entry['name']} skip={skip}: {error}")
-            continue
-        if data.get("Stock") == 0:
-            continue
-        batch = data["Data"]["Products"]
-        await db.save_products(entry["name"], batch)
-        saved += len(batch)
-
-    print(f"{entry['name']}: upserted {saved} products")
+async def fetch_category(session, headers_holder, entry, semaphore, failures):
+    base = category_filter(entry["name"])
+    fetched, written, cursor = 0, 0, None
+    try:
+        while True:
+            filt = base
+            if cursor is not None:
+                filt = f"{base} and ItemNumber gt {odata_str(cursor)}"
+            body = {
+                "filter": filt,
+                "isIncludeCount": False,
+                "search": "",
+                "orderby": "ItemNumber",
+                "orderbydirection": "asc",
+                "skip": 0,
+                "top": BATCH_SIZE,
+                "isProductImageInclude": False,
+                "isSkipFacets": True,
+            }
+            async with semaphore:
+                data = await post_search(session, headers_holder, body)
+            if not data or not data.get("IsSuccessFull"):
+                error = data.get("ErrorMessage") if data else "request failed"
+                print(f"error fetching {entry['name']} after {fetched}: {error}")
+                failures.append((entry["name"], fetched))
+                break
+            batch = (data.get("Data") or {}).get("Products") or []
+            if not batch:
+                break
+            written += await db.save_products(entry["name"], batch)
+            fetched += len(batch)
+            cursor = batch[-1].get("ItemNumber")
+            if not cursor:
+                print(
+                    f"error fetching {entry['name']} after {fetched}: no ItemNumber to page on"
+                )
+                failures.append((entry["name"], fetched))
+                break
+            if len(batch) < BATCH_SIZE:
+                break
+    except Exception as error:
+        print(f"error fetching {entry['name']} after {fetched}: {error!r}")
+        failures.append((entry["name"], fetched))
+    print(
+        f"{entry['name']}: {fetched} fetched, {written} written (badge {entry['count']})"
+    )
 
 
 async def fetch_products(concurrency=4):
-    """Read categories.json (built by discover_categories) and pull full product
-    data straight from the XHR endpoint in BATCH_SIZE-sized pages, upserting each
-    batch into Postgres (current state in `products`, superseded versions archived
-    into `products_history` by a trigger). Splits any category whose count exceeds
-    BATCH_SIZE across multiple requests."""
     if not categories_path.exists():
         print(f"{categories_path} not found, run `python scraper.py discover` first")
         return
 
     await db.init_db()
     entries = json.loads(categories_path.read_text(encoding="utf-8"))
-    headers_holder = {"headers": await get_api_headers()}
+    headers_holder = {"headers": await get_api_headers(), "lock": asyncio.Lock()}
     semaphore = asyncio.Semaphore(concurrency)
+    failures = []
 
-    async with aiohttp.ClientSession() as session:
+    timeout = aiohttp.ClientTimeout(total=180, connect=30)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
         await asyncio.gather(
             *(
-                fetch_category(session, headers_holder, entry, semaphore)
+                fetch_category(session, headers_holder, entry, semaphore, failures)
                 for entry in entries
-            )
+            ),
+            return_exceptions=True,
         )
+
+    if failures:
+        print()
+        print(f"{len(failures)} pages failed:")
+        for name, fetched in failures:
+            print(f"   {name} stopped after {fetched}")
 
 
 async def main():
@@ -245,4 +255,5 @@ async def main():
         print("usage: python scraper.py [discover|fetch]")
 
 
-asyncio.run(main())
+if __name__ == "__main__":
+    asyncio.run(main())
