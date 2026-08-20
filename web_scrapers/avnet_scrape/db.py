@@ -40,6 +40,9 @@ DROP_ALWAYS = frozenset(
         "sys_update_dt",
         "sys_delta_dt",
         "ItemRowNumber",
+        # the index's own quantity: measured at ~73% accurate against the live
+        # inventory endpoint, so products_stock.qty is the only one kept
+        "Stock",
         "ERPPartCreateDate",  # == ActiveDate
         "Structuregroupidentifier",  # == deepest Level_N_ID
         "ImagePath",
@@ -78,7 +81,6 @@ PROMOTED = frozenset(
         "Level_4_Name",
         "SAPMatgroup",
         "Instock",
-        "Stock",
         "QtyMin",
         "QtyMult",
         "Werks",
@@ -120,13 +122,11 @@ COLUMNS = (
     "cat_l4",
     "sap_matgroup",
     "in_stock",
-    "stock",
     "qty_min",
     "qty_mult",
     "warehouse",
     "packaging",
     "erp_status",
-    "price",
     "active_date",
     "obsolete",
     "eol",
@@ -163,14 +163,6 @@ REQUIRED_COLUMNS = tuple(
 )
 
 
-def _assignment(column):
-    # price does not come from the search API, so an upsert must never blank out
-    # a price that some other job has already filled in.
-    if column == "price":
-        return "price = COALESCE(EXCLUDED.price, products.price)"
-    return f"{column} = EXCLUDED.{column}"
-
-
 # item_number is the conflict key and first_seen_at must survive updates, so
 # neither is reassigned here.
 UPSERT_SQL = """
@@ -184,7 +176,9 @@ UPSERT_SQL = """
     columns=", ".join(COLUMNS),
     placeholders=", ".join(["%s"] * len(COLUMNS)),
     assignments=",\n        ".join(
-        _assignment(column) for column in COLUMNS if column != "item_number"
+        f"{column} = EXCLUDED.{column}"
+        for column in COLUMNS
+        if column != "item_number"
     ),
 )
 
@@ -215,6 +209,8 @@ def _int(value):
 
 
 def _num(value):
+    # unused since price left this table; kept for the price parser that will
+    # feed products_price once there is a source for it
     if value is None or value == "":
         return None
     try:
@@ -319,15 +315,11 @@ def build_row(product, category=None):
         "cat_l4": _text(product.get("Level_4_Name")),
         "sap_matgroup": _text(product.get("SAPMatgroup")),
         "in_stock": bool(_bool(product.get("Instock"))),
-        "stock": _int(product.get("Stock")),
         "qty_min": _int(product.get("QtyMin")),
         "qty_mult": _int(product.get("QtyMult")),
         "warehouse": _text(product.get("Werks")),
         "packaging": _text(product.get("PackagingTypeCode")),
         "erp_status": _text(product.get("ERPProductStatus")),
-        # never present in the search API today; here for the separate price
-        # source that will fill it in
-        "price": _num(product.get("Price")),
         "active_date": _date(product.get("ActiveDate")),
         "obsolete": _bool(product.get("ObsoleteFlag")),
         "eol": _bool(product.get("EndofLifeFlag")),
@@ -451,3 +443,129 @@ def _run_stats_sync(since):
 async def run_stats(since):
     """(total rows, inserted this run, updated this run, seen this run)."""
     return await asyncio.to_thread(_run_stats_sync, since)
+
+
+# The inventory and pricing sources are keyed by ERPPartNumber + ERPManufacturer
+# code, not by ItemNumber, so every sync starts from this projection.
+PARTS_SQL = """
+    SELECT item_number, erp_part_number, erp_mfr_code
+    FROM products
+    WHERE in_stock AND erp_part_number IS NOT NULL AND erp_mfr_code IS NOT NULL
+    ORDER BY item_number
+"""
+
+STOCK_UPSERT = """
+    INSERT INTO products_stock (item_number, qty, lead_time, unit, checked_at)
+    SELECT i, q, l, u, now()
+    FROM unnest(%s::text[], %s::bigint[], %s::text[], %s::text[]) AS t(i, q, l, u)
+    ON CONFLICT (item_number) DO UPDATE SET
+        qty = EXCLUDED.qty,
+        lead_time = EXCLUDED.lead_time,
+        unit = EXCLUDED.unit,
+        checked_at = now()
+"""
+
+PRICE_UPSERT = """
+    INSERT INTO products_price (item_number, price, currency, breaks, checked_at)
+    SELECT i, p, c, b, now()
+    FROM unnest(%s::text[], %s::numeric[], %s::text[], %s::jsonb[]) AS t(i, p, c, b)
+    ON CONFLICT (item_number) DO UPDATE SET
+        price = EXCLUDED.price,
+        currency = EXCLUDED.currency,
+        breaks = EXCLUDED.breaks,
+        checked_at = now()
+"""
+
+
+def _parts_for_sync_sync():
+    with psycopg.connect(**DATABASE_CONNECTION) as connection:
+        return connection.execute(PARTS_SQL).fetchall()
+
+
+async def parts_for_sync():
+    """(item_number, erp_part_number, erp_mfr_code) for every part worth checking.
+
+    Scoped to what the catalog calls in stock: a part the search index has never
+    seen in stock is not worth a live lookup, and at ~23 parts/sec a full 1M-row
+    catalog would take half a day.
+    """
+    return await asyncio.to_thread(_parts_for_sync_sync)
+
+
+def _save_live_sync(sql, table, value_column, records):
+    """Upsert one batch into a narrow live table, reporting what moved.
+
+    Reads the previous values first so the run can say how many quantities (or
+    prices) actually moved, which the upsert itself cannot report: checked_at
+    has to advance for every row, so `rowcount` is always the whole batch.
+    """
+    # a repeated key inside one statement would abort the whole INSERT
+    records = list({record[0]: record for record in records}.values())
+    item_numbers = [record[0] for record in records]
+
+    with psycopg.connect(**DATABASE_CONNECTION) as connection:
+        with connection.cursor() as cursor:
+            previous = dict(
+                cursor.execute(
+                    f"SELECT item_number, {value_column} FROM {table}"
+                    " WHERE item_number = ANY(%s)",
+                    (item_numbers,),
+                ).fetchall()
+            )
+            cursor.execute(sql, tuple(list(column) for column in zip(*records)))
+
+    # the value column is always the second field of a record
+    new = sum(1 for record in records if record[0] not in previous)
+    changed = sum(
+        1
+        for record in records
+        if record[0] in previous and previous[record[0]] != record[1]
+    )
+    zeroed = sum(1 for record in records if not record[1] and previous.get(record[0]))
+    return len(records), new, changed, zeroed
+
+
+async def save_stock(records):
+    """records: (item_number, qty, lead_time, unit).
+
+    Returns (written, new, changed, zeroed).
+    """
+    if not records:
+        return 0, 0, 0, 0
+    return await asyncio.to_thread(
+        _save_live_sync, STOCK_UPSERT, "products_stock", "qty", records
+    )
+
+
+async def save_prices(records):
+    """records: (item_number, price, currency, breaks).
+
+    Returns (written, new, changed, zeroed).
+
+    `breaks` must already be a psycopg Jsonb (or None) - it lands in a jsonb[].
+    """
+    if not records:
+        return 0, 0, 0, 0
+    return await asyncio.to_thread(
+        _save_live_sync, PRICE_UPSERT, "products_price", "price", records
+    )
+
+
+def _stock_stats_sync():
+    with psycopg.connect(**DATABASE_CONNECTION) as connection:
+        return connection.execute(
+            """
+            SELECT count(*),
+                   count(*) FILTER (WHERE coalesce(s.qty, 0) > 0),
+                   count(*) FILTER (WHERE p.in_stock AND coalesce(s.qty, 0) = 0),
+                   count(*) FILTER (WHERE s.qty >= p.qty_min)
+            FROM products_stock s JOIN products p USING (item_number)
+            """
+        ).fetchone()
+
+
+async def stock_stats():
+    """(rows, really available, catalog calls in stock but is really 0,
+    really buyable at the minimum order quantity).
+    """
+    return await asyncio.to_thread(_stock_stats_sync)

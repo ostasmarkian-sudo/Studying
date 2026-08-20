@@ -28,6 +28,18 @@ CATALOG_FILTER = "Sboat eq 'T'"
 # is a server error and `eq 'Y'` silently matches nothing.
 IN_STOCK_FILTER = "Instock eq 'Yes'"
 
+# Live availability, straight from SAP - the same call the product page makes.
+# The search index's Stock is only a snapshot taken when the index was built.
+INVENTORY_URL = "https://apigw.avnet.com/external/fspmicro-inventory/api/inventory/getinventory"
+# The endpoint runs at ~23 parts/sec whatever the batch size (measured at 100,
+# 500, 1000 and 2000 per call), so keep requests short rather than sending
+# 2000-part monsters that hold a connection open for 84 seconds.
+STOCK_CHUNK = 100
+
+# Flip to True once fetch_price_chunk() below is implemented, so `price` stops
+# short instead of launching a browser and opening a session for nothing.
+PRICE_SOURCE_READY = False
+
 
 async def creating_links(page):
     await page.goto(
@@ -134,10 +146,14 @@ async def refresh_headers(headers_holder, stale):
 
 
 async def post_search(session, headers_holder, body, attempts=4):
+    return await post_json(session, headers_holder, API_URL, body, attempts)
+
+
+async def post_json(session, headers_holder, url, body, attempts=4):
     for attempt in range(attempts):
         current = headers_holder["headers"]
         try:
-            async with session.post(API_URL, headers=current, json=body) as resp:
+            async with session.post(url, headers=current, json=body) as resp:
                 if resp.status == 401:
                     await refresh_headers(headers_holder, current)
                     continue
@@ -349,6 +365,125 @@ async def fetch_all():
     await report(started_at, failures)
 
 
+async def fetch_stock_chunk(session, headers_holder, parts, semaphore):
+    """Live quantity for up to STOCK_CHUNK parts, keyed the way SAP keys them.
+
+    `matnr` is the ERPPartNumber and `mfr` the ERPManufacturerCode; the response
+    carries `qas` (available quantity), `plifz` (lead time) and `meins` (unit),
+    stamped with today's date because it is computed per request rather than
+    served from a cache.
+    """
+    body = {
+        "iT_INVENTORY": [
+            {"sboat": "T", "matnr": erp, "mfr": mfr, "reQ_DATE": ""}
+            for _, erp, mfr in parts
+        ]
+    }
+    async with semaphore:
+        data = await post_json(session, headers_holder, INVENTORY_URL, body)
+    if not data or not data.get("isSuccessFull"):
+        return None
+
+    entries = (data.get("data") or {}).get("eT_INVENTORY") or []
+    by_part = {entry.get("matnr"): entry for entry in entries}
+    records = []
+    for item_number, erp, _ in parts:
+        entry = by_part.get(erp)
+        if entry is None:
+            continue
+        quantity = entry.get("qas")
+        records.append(
+            (
+                item_number,
+                int(quantity) if quantity is not None else None,
+                (entry.get("plifz") or "").strip() or None,
+                (entry.get("meins") or "").strip() or None,
+            )
+        )
+    return records
+
+
+async def fetch_price_chunk(session, headers_holder, parts, semaphore):
+    """Current price for up to STOCK_CHUNK parts - not implemented yet.
+
+    Prices are gated behind a signed-in Abacus account. With the anonymous
+    profile the scraper uses, the product page shows "SIGN IN TO SEE YOUR ABACUS
+    PRICE" and fires no pricing call at all, so the endpoint and its payload are
+    still unknown - there is nothing to guess at here.
+
+    To finish it: sign into a real account once inside browser_profile_avnet
+    (headless=False), reload a product page with the network log open, find the
+    call that returns the price, and return records shaped like
+    (item_number, price, currency, Jsonb(breaks) or None). Everything
+    downstream - products_price, save_prices, the `price` mode - already works.
+    """
+    raise NotImplementedError(
+        "no pricing source yet: sign browser_profile_avnet into an Abacus "
+        "account and fill in fetch_price_chunk()"
+    )
+
+
+async def sync_live(label, fetch_chunk, save, concurrency=4):
+    """Drive one live-data sweep: read the parts, fetch in chunks, store."""
+    await db.init_db()
+    parts = await db.parts_for_sync()
+    if not parts:
+        print("nothing to check - run `python scraper.py fetch-all` first")
+        return
+    print(f"{label}: checking {len(parts)} parts")
+
+    headers_holder = {"headers": await get_api_headers(), "lock": asyncio.Lock()}
+    semaphore = asyncio.Semaphore(concurrency)
+    chunks = [parts[i:i + STOCK_CHUNK] for i in range(0, len(parts), STOCK_CHUNK)]
+    written = new = changed = zeroed = missing = 0
+
+    timeout = aiohttp.ClientTimeout(total=180, connect=30)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+
+        async def run(chunk):
+            nonlocal written, new, changed, zeroed, missing
+            records = await fetch_chunk(session, headers_holder, chunk, semaphore)
+            if records is None:
+                missing += len(chunk)
+                return
+            missing += len(chunk) - len(records)
+            counts = await save(records)
+            written += counts[0]
+            new += counts[1]
+            changed += counts[2]
+            zeroed += counts[3]
+
+        await asyncio.gather(*(run(chunk) for chunk in chunks))
+
+    print()
+    print(
+        f"{label}: {written} stored, {new} new, {changed} changed, "
+        f"{zeroed} dropped to zero"
+        + (f", {missing} without a live record" if missing else "")
+    )
+
+
+async def fetch_stock():
+    await sync_live("live stock", fetch_stock_chunk, db.save_stock)
+    rows, available, ghosts, buyable = await db.stock_stats()
+    print(
+        f"of {rows} parts checked, {available} can really be shipped and "
+        f"{buyable} clear their minimum order quantity; "
+        f"{ghosts} are listed in stock but are really at zero"
+    )
+
+
+async def fetch_prices():
+    if not PRICE_SOURCE_READY:
+        print(
+            "price sync is not wired up yet - prices need a signed-in "
+            "Abacus account. See fetch_price_chunk() for what to fill in; "
+            "the table, the upsert and this mode are already in place."
+        )
+        return
+    await sync_live("price", fetch_price_chunk, db.save_prices)
+
+
 async def main():
     mode = sys.argv[1] if len(sys.argv) > 1 else None
     if mode == "discover":
@@ -357,8 +492,12 @@ async def main():
         await fetch_products()
     elif mode == "fetch-all":
         await fetch_all()
+    elif mode == "stock":
+        await fetch_stock()
+    elif mode == "price":
+        await fetch_prices()
     else:
-        print("usage: python scraper.py [discover|fetch|fetch-all]")
+        print("usage: python scraper.py [discover|fetch|fetch-all|stock|price]")
 
 
 if __name__ == "__main__":
