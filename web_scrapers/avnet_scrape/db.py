@@ -3,7 +3,6 @@ import hashlib
 import json
 from datetime import date
 from pathlib import Path
-
 import psycopg
 from psycopg.types.json import Jsonb
 
@@ -176,9 +175,7 @@ UPSERT_SQL = """
     columns=", ".join(COLUMNS),
     placeholders=", ".join(["%s"] * len(COLUMNS)),
     assignments=",\n        ".join(
-        f"{column} = EXCLUDED.{column}"
-        for column in COLUMNS
-        if column != "item_number"
+        f"{column} = EXCLUDED.{column}" for column in COLUMNS if column != "item_number"
     ),
 )
 

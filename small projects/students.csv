@@ -1,0 +1,16 @@
+id,name,age,city,course,score,enrolled_date,active
+1,Olena Petrenko,21,Lviv,Python,88.5,2024-09-01,True
+2,Ivan Kovalenko,23,Kyiv,Data Engineering,92.0,2024-09-03,True
+3,Mariia Bondar,19,Odesa,Python,,2024-09-05,True
+4,Taras Shevchuk,25,Lviv,SQL,76.3,2024-09-10,False
+5,Anna Melnyk,22,Kharkiv,Data Engineering,81.9,2024-09-12,True
+6,Petro Symonenko,20,Lviv,Python,95.4,2024-09-15,True
+7,Kateryna Boyko,24,Dnipro,SQL,,2024-09-18,False
+8,Yurii Hrytsenko,,Lviv,Data Engineering,69.2,2024-09-20,True
+9,Sofia Lysenko,21,Kyiv,Python,84.0,2024-09-22,True
+10,Andrii Moroz,26,Odesa,SQL,73.1,,True
+11,Iryna Kravets,23,Lviv,Data Engineering,90.7,2024-09-28,False
+12,Bohdan Rudenko,22,Kharkiv,Python,,2024-10-01,True
+13,Nadiia Tkachuk,20,Dnipro,SQL,88.8,2024-10-03,True
+14,Oleh Savchenko,24,Lviv,Data Engineering,79.5,2024-10-05,True
+15,Vira Kushnir,21,Kyiv,Python,91.2,2024-10-08,False

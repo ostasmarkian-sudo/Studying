@@ -21,8 +21,12 @@ async def get_url(urlqueus, page):
         wait_until="load",
     )
     catalog = page.locator('//ul[@ref_page_event="Select Family"]')
-    for _ in range(25):
-        await page.mouse.wheel(0, 1400)
+    end_page = await page.locator('div[class="footer__bottom--line-2"]').bounding_box()
+    x_R = end_page["x"] + end_page["width"] / 2
+    y_R = end_page["y"] + end_page["height"] / 2
+    X = random.randint(15, 45)
+    for _ in range(X):
+        await page.mouse.wheel(x_R / X, y_R / X)
         await page.wait_for_timeout(random.randint(1, 100))
     catalog_button = page.locator(
         'a[class="tss-css-gqjq9w-root-NthLevelCategory-categoryAnchor"]'
