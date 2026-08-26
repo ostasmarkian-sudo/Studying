@@ -16,12 +16,13 @@ s = reviews.apply(lambda row: row["score"] - row["age"], axis=1)
 
 
 def level(x):
-    if x > 0:
-        return "above average"
-    elif x < 0:
-        return "below average"
-    else:
-        return "average"
+    match True:
+        case _ if x > 0:
+            return "above average"
+        case _ if x < 0:
+            return "below average"
+        case _:
+            return "average"
 
 
 d = score_diff.apply(level)

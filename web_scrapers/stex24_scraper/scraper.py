@@ -62,7 +62,7 @@ SEM = asyncio.Semaphore(CONCURRENCY)
 # The token is the csrf[frontend.store-api.proxy] cookie any plain GET hands out.
 PROXY = f"{BASE}/_proxy/store-api?path=%2Fstore-api%2Fproduct"
 CSRF_COOKIE = "csrf[frontend.store-api.proxy]"
-BATCH = 250  # no ceiling on the length of ids; 250 keeps a reply under a megabyte
+BATCH = 1000  # no ceiling on the length of ids; 250 keeps a reply under a megabyte
 PAUSE = (0.8, 2.5)  # random gap between batches, seconds
 
 AJAX = {
