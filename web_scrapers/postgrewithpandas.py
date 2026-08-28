@@ -33,8 +33,6 @@ LEFT JOIN products_stock ps ON ps.item_number = p.item_number;""",
 
 stex24 = pd.read_sql("SELECT * FROM stex24_products", engine_1)
 df = pd.read_sql("SELECT * FROM product_unique", engine_2)
-import pandas as pd
-import matplotlib.pyplot as plt
 
 df.columns = [
     "id",
@@ -52,14 +50,11 @@ top_by_qty = (
     df.groupby("manufacturer")["quantity"].sum().sort_values(ascending=False).head(10)
 )
 fig, axes = plt.subplots(1, 2, figsize=(14, 6))
-
-axes[0].barh(top_by_sku.index[::-1], top_by_sku.values[::-1])
+axes[0].pie(top_by_sku.values[::-1], labels=top_by_sku.index[::-1])
 axes[0].set_title("Manufactures Manufactures (SKU)")
 axes[0].set_xlabel("number unique products")
-
-axes[1].barh(top_by_qty.index[::-1], top_by_qty.values[::-1])
+axes[1].pie(top_by_qty.values[::-1], labels=top_by_qty.index[::-1])
 axes[1].set_title("Top-10 Manufactures (quantity)")
 axes[1].set_xlabel("Total number")
-
 plt.tight_layout()
 plt.show()
