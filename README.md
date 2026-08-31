@@ -162,12 +162,6 @@ applied. On Linux and macOS the question does not arise.
 
 ---
 
-## Status
-
-An educational repository, actively worked on. The code is written to learn the
-tools rather than to run in production: error handling and retry logic are
-uneven, and some files are scratch experiments.
-
 ## Author
 
 [ostasmarkian-sudo](https://github.com/ostasmarkian-sudo)
