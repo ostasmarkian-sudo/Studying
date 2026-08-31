@@ -7,7 +7,7 @@ amount = rng.normal(loc=50, scale=15, size=1000).clip(1, None)
 
 outlier_idx = rng.choice(1000, size=20, replace=False)
 amount[outlier_idx] *= rng.uniform(5, 10, size=20)
-user_day_matrix = np.zeros((100, 90))
+user_day_matrix = np.zeros((100, 100))
 np.add.at(user_day_matrix, (user_id, timestamp), amount)
 
 sums = np.zeros(100)
