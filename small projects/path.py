@@ -150,10 +150,8 @@ class Maze:
                 self.solution = (actions, cells)
                 return
 
-            # Mark node as explored
             self.explored.add(node.state)
 
-            # Add neighbors to frontier
             for action, state in self.neighbors(node.state):
                 if not frontier.contains_state(state) and state not in self.explored:
                     child = Node(state=state, parent=node, action=action)
@@ -226,4 +224,4 @@ m.solve()
 print("States Explored:", m.num_explored)
 print("Solution:")
 m.print()
-m.output_image("maze.png", show_explored=True)
+m.output_image("path.png", show_explored=True)
