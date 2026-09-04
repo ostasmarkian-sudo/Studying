@@ -30,7 +30,9 @@ IN_STOCK_FILTER = "Instock eq 'Yes'"
 
 # Live availability, straight from SAP - the same call the product page makes.
 # The search index's Stock is only a snapshot taken when the index was built.
-INVENTORY_URL = "https://apigw.avnet.com/external/fspmicro-inventory/api/inventory/getinventory"
+INVENTORY_URL = (
+    "https://apigw.avnet.com/external/fspmicro-inventory/api/inventory/getinventory"
+)
 # The endpoint runs at ~23 parts/sec whatever the batch size (measured at 100,
 # 500, 1000 and 2000 per call), so keep requests short rather than sending
 # 2000-part monsters that hold a connection open for 84 seconds.
@@ -78,8 +80,8 @@ def odata_str(value):
 def category_filter(name, in_stock=True):
     literal = odata_str(name)
     parts = [
-        f"(Level_2_Name eq {literal}"
-        f" or Level_3_Name eq {literal}"
+        f"(Level_2_Name eq {literal}",
+        f" or Level_3_Name eq {literal}",
         f" or Level_4_Name eq {literal})",
         CATALOG_FILTER,
     ]
@@ -434,7 +436,7 @@ async def sync_live(label, fetch_chunk, save, concurrency=4):
 
     headers_holder = {"headers": await get_api_headers(), "lock": asyncio.Lock()}
     semaphore = asyncio.Semaphore(concurrency)
-    chunks = [parts[i:i + STOCK_CHUNK] for i in range(0, len(parts), STOCK_CHUNK)]
+    chunks = [parts[i : i + STOCK_CHUNK] for i in range(0, len(parts), STOCK_CHUNK)]
     written = new = changed = zeroed = missing = 0
 
     timeout = aiohttp.ClientTimeout(total=180, connect=30)
