@@ -1,12 +1,30 @@
 import httpx
-from bs4 import BeautifulSoup
 import asyncio
 import json
-import re
+import psycopg
+
+A = "https://auto.ria.com/api/search/auto"
+U = "https://auto.ria.com/graphql/"
+H = {
+    "Content-Type": "application/json",
+    "Accept": "application/json",
+    "Referer": "https://auto.ria.com/uk/search/",
+    "Origin": "https://auto.ria.com",
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+}
+Q = """query($ids:[ID],$lang:ID){ advertisements(ids:$ids, langId:$lang){
+  id year race VIN uri title status createdAt
+  brand{id name} model{id name} fuel{id name} gearbox{id name}
+  engine{volume{liters}}
+  price{main{value currency{sign}} all{USD{value} UAH{value}}}
+  location{city{id name} state{id name}}
+  photos{all{url}}
+}}"""
 
 LIMIT = 500
 URL = "https://auto.ria.com/uk/search/"
-TIMEOUT = httpx.Timeout(connect=5.0, read=10.0, write=5.0, pool=5.0)
+TIMEOUT = httpx.Timeout(connect=10.0, read=90.0, write=10.0, pool=60.0)
 LIMITS = httpx.Limits(max_connections=7, max_keepalive_connections=7)
 headers = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -27,50 +45,93 @@ headers = {
     "Referer": "https://auto.ria.com/uk/",
 }
 
+QUEUE_MAXSIZE = 8
+GQL_BATCH = 500
+CONSUMERS = 1
 
-async def get_catalog():
-    async with (
-        httpx.AsyncClient(headers=headers, timeout=TIMEOUT, limits=LIMITS) as client,
-    ):
-        with open("cars.jsonl", "a", encoding="utf-8") as f:
-            params = {
-                "category": 0,
-                "abroad": 0,
-                "customs_cleared": 1,
-                "limit": LIMIT,
-                "page": 0,
-            }
-            response = await client.get(URL, params=params)
-            html = response.text
-            urls = await parser(html)
-            print(response.status_code)
-
-            for car_data in urls:
-                f.write(json.dumps(car_data, ensure_ascii=False) + "\n")
+queue = asyncio.Queue(maxsize=QUEUE_MAXSIZE)
 
 
-async def parser(html):
-    urls = []
-    soup = BeautifulSoup(html, "lxml")
-    cars = soup.find_all("a", class_="link product-card horizontal")
-    for card in cars:
-        car_id = card.get("data-car-id")
-        url = "https://auto.ria.com" + card.get("href")
+async def fetch_ids(
+    client,
+    queue,
+    categories=range(1, 11),
+):
+    total = 0
+    for category_id in categories:
+        page = 0
+        while True:
+            r = await client.get(
+                A, params={"category_id": category_id, "page": page, "countpage": 100}
+            )
+            r.raise_for_status()
+            batch = r.json()["result"]["search_result"]["ids"]
+            if not batch:
+                break
+            await queue.put(batch)
+            total += len(batch)
+            page += 1
+            print(
+                f"cat {category_id} page {page}: +{len(batch)} (queue {queue.qsize()})"
+            )
+    print(f"finished: {total} id")
 
-        title = card.select_one(".product-card-content .titleS")
-        title = title.get_text(strip=True) if title else None
-        cars_count = soup.find("span", class_="common-text ws-pre-wrap body")
-        cars_count = cars_count.get_text() if cars_count else None
-        match = re.findall(r"\d", cars_count)
-        print(match)
 
-        car_data = {
-            "car_id": car_id,
-            "url": url,
-            "title": title,
-        }
-        urls.append(car_data)
-    return urls
+async def drain(queue, limit=GQL_BATCH):
+    batch = await queue.get()
+    if batch is None:
+        return None
+    ids = list(batch)
+    while len(ids) < limit:
+        try:
+            nxt = queue.get_nowait()
+        except asyncio.QueueEmpty:
+            break
+        if nxt is None:
+            queue.put_nowait(None)
+            break
+        ids += nxt
+    return ids
 
 
-asyncio.run(get_catalog())
+async def consume(client, queue):
+    while True:
+        ids = await drain(queue)
+        if ids is None:
+            break
+        await fetch_cars(client, ids)
+
+
+async def produce(client, queue, categories=range(1, 11), consumers=CONSUMERS):
+    try:
+        await fetch_ids(client, queue, categories)
+    finally:
+        for _ in range(consumers):
+            await queue.put(None)
+
+
+async def fetch_cars(client, ids):
+    r = await client.post(
+        U, json={"query": Q, "variables": {"ids": ids[:500], "lang": 4}}
+    )
+    r.raise_for_status()
+    d = r.json()
+    if "errors" in d:
+        print("errors:", len(d["errors"]), d["errors"][0]["message"])
+    for car in (d.get("data") or {}).get("advertisements") or []:
+        if car["status"] != "ACTIVE" or car["brand"] is None:
+            continue
+        print(car["id"], car["title"], car["price"]["all"]["USD"]["value"], "$")
+
+
+async def main():
+    async with httpx.AsyncClient(
+        headers=headers, limits=LIMITS, timeout=TIMEOUT
+    ) as client:
+        async with asyncio.TaskGroup() as tg:
+            tg.create_task(produce(client, queue))
+            for _ in range(CONSUMERS):
+                tg.create_task(consume(client, queue))
+
+
+asyncio.run(main())
