@@ -1,7 +1,6 @@
 import httpx
 import asyncio
 import json
-import random
 import psycopg
 from db import DATABASE_CONNECTION
 from db import data_recording, init_db
@@ -59,28 +58,6 @@ CONSUMERS = 1
 queue = asyncio.Queue(maxsize=QUEUE_MAXSIZE)
 
 
-async def request(client, method, url, retries=5, **kwargs):
-    last = None
-    for attempt in range(retries):
-        try:
-            r = await client.request(method, url, **kwargs)
-            if r.status_code in (429, 500, 502, 503, 504):
-                last = httpx.HTTPStatusError(
-                    f"HTTP {r.status_code}", request=r.request, response=r
-                )
-            else:
-                r.raise_for_status()
-                return r
-        except (httpx.TransportError, httpx.HTTPStatusError) as e:
-            last = e
-        delay = 2**attempt + random.uniform(0, 1)
-        print(
-            f"    retry {attempt + 1}/{retries} за {delay:.1f}s ({type(last).__name__})"
-        )
-        await asyncio.sleep(delay)
-    raise last
-
-
 async def fetch_ids(
     client,
     queue,
@@ -98,9 +75,7 @@ async def fetch_ids(
             stop_at = str(row[0]) if row else None
             page = 0
             while True:
-                r = await request(
-                    client,
-                    "GET",
+                r = await client.get(
                     A,
                     params={
                         "category_id": category_id,
@@ -109,6 +84,7 @@ async def fetch_ids(
                         "order_by": 7,
                     },
                 )
+                r.raise_for_status()
                 batch = r.json()["result"]["search_result"]["ids"]
 
                 if not batch:
@@ -140,10 +116,7 @@ async def drain(queue, limit=GQL_BATCH):
         except asyncio.QueueEmpty:
             break
         if nxt is None:
-            try:
-                queue.put_nowait(None)
-            except asyncio.QueueFull:
-                pass
+            queue.put_nowait(None)
             break
         ids += nxt
     return ids
@@ -154,33 +127,22 @@ async def consume(client, queue):
         ids = await drain(queue)
         if ids is None:
             break
-        try:
-            await fetch_cars(client, ids)
-        except Exception as e:
-            # пачку втрачаємо, але консюмер живий - інакше продюсер упреться
-            # в повну чергу і весь TaskGroup зависне
-            print(
-                f"  consume пропустив {len(ids)} id: {type(e).__name__}: {str(e)[:70]}"
-            )
+        await fetch_cars(client, ids)
 
 
 async def produce(client, queue, categories=range(1, 11), consumers=CONSUMERS):
     try:
         await fetch_ids(client, queue, categories)
     finally:
-        # put_nowait, а не await: при скасуванні черга буває повна, і await тут
-        # завис би назавжди - консюмера, який її розвантажить, уже немає.
         for _ in range(consumers):
-            try:
-                queue.put_nowait(None)
-            except asyncio.QueueFull:
-                break
+            await queue.put(None)
 
 
 async def fetch_cars(client, ids):
-    r = await request(
-        client, "POST", U, json={"query": Q, "variables": {"ids": ids[:500], "lang": 4}}
+    r = await client.post(
+        U, json={"query": Q, "variables": {"ids": ids[:500], "lang": 4}}
     )
+    r.raise_for_status()
     d = r.json()
     if "errors" in d:
         print("errors:", len(d["errors"]), d["errors"][0]["message"])
