@@ -1,10 +1,15 @@
-import httpx
 import asyncio
 import json
 import random
+import sys
+from pathlib import Path
+
+import httpx
 import psycopg
-from db import DATABASE_CONNECTION
-from db import data_recording, init_db
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
+from core.db import DATABASE_CONNECTION, data_recording, init_db
 
 A = "https://auto.ria.com/api/search/auto"
 U = "https://auto.ria.com/graphql/"
