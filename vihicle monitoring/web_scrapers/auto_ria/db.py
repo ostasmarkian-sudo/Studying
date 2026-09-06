@@ -269,10 +269,6 @@ def _data_recording_sync(cars):
             skipped += 1
             continue
         rows.append(row)
-
-    # Один car_id може прийти двічі в межах пачки: сторінки видачі дрейфують,
-    # і сусідні сторінки подекуди повертають те саме оголошення. Лишаємо
-    # останній стан - писати той самий ключ двічі в одному executemany не можна.
     rows = list({row["car_id"]: row for row in rows}.values())
     if not rows:
         return 0, skipped, 0

@@ -85,7 +85,7 @@ async def fetch_ids(
     client,
     queue,
     categories=range(1, 11),
-    full=True,
+    full=False,
 ):
     total = 0
     with psycopg.connect(**DATABASE_CONNECTION) as conn:
@@ -158,11 +158,7 @@ async def consume(client, queue):
         try:
             await fetch_cars(client, ids)
         except Exception as e:
-            # пачку втрачаємо, але консюмер живий - інакше продюсер упреться
-            # в повну чергу і весь TaskGroup зависне
-            print(
-                f"  consume пропустив {len(ids)} id: {type(e).__name__}: {str(e)[:70]}"
-            )
+            print(f"  consume skiped {len(ids)} id: {type(e).__name__}: {str(e)[:70]}")
 
 
 async def produce(
@@ -171,8 +167,6 @@ async def produce(
     try:
         await fetch_ids(client, queue, categories, full=full)
     finally:
-        # put_nowait, а не await: при скасуванні черга буває повна, і await тут
-        # завис би назавжди - консюмера, який її розвантажить, уже немає.
         for _ in range(consumers):
             try:
                 queue.put_nowait(None)
@@ -192,9 +186,7 @@ async def fetch_cars(client, ids):
         for car in (d.get("data") or {}).get("advertisements") or []
         if car and car.get("status") == "ACTIVE" and car.get("brand")
     ]
-    written, skipped, historied = await data_recording(
-        cars
-    )  # data_recording(analyze(cars))
+    written, skipped, historied = await data_recording(cars)
     print(f"  db:recorded {written}, skipped {skipped}, histored +{historied}")
 
 
