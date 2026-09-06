@@ -32,7 +32,7 @@ Q = """query($ids:[ID],$lang:ID){ advertisements(ids:$ids, langId:$lang){
 LIMIT = 500
 URL = "https://auto.ria.com/uk/search/"
 TIMEOUT = httpx.Timeout(connect=10.0, read=90.0, write=10.0, pool=60.0)
-LIMITS = httpx.Limits(max_connections=7, max_keepalive_connections=7)
+LIMITS = httpx.Limits(max_connections=8, max_keepalive_connections=8)
 headers = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
@@ -54,7 +54,7 @@ headers = {
 
 QUEUE_MAXSIZE = 8
 GQL_BATCH = 500
-CONSUMERS = 1
+CONSUMERS = 3
 
 queue = asyncio.Queue(maxsize=QUEUE_MAXSIZE)
 
@@ -85,6 +85,7 @@ async def fetch_ids(
     client,
     queue,
     categories=range(1, 11),
+    full=True,
 ):
     total = 0
     with psycopg.connect(**DATABASE_CONNECTION) as conn:
@@ -95,7 +96,7 @@ async def fetch_ids(
                    order by listed_at desc limit 1""",
                 (category_id,),
             ).fetchone()
-            stop_at = str(row[0]) if row else None
+            stop_at = None if full else (str(row[0]) if row else None)
             page = 0
             while True:
                 r = await request(
@@ -164,9 +165,11 @@ async def consume(client, queue):
             )
 
 
-async def produce(client, queue, categories=range(1, 11), consumers=CONSUMERS):
+async def produce(
+    client, queue, categories=range(1, 11), consumers=CONSUMERS, full=False
+):
     try:
-        await fetch_ids(client, queue, categories)
+        await fetch_ids(client, queue, categories, full=full)
     finally:
         # put_nowait, а не await: при скасуванні черга буває повна, і await тут
         # завис би назавжди - консюмера, який її розвантажить, уже немає.

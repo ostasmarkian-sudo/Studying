@@ -449,9 +449,24 @@ CREATE TABLE IF NOT EXISTS cars (
 -- сторінках місце під HOT-оновлення замість того, щоб розповзатися.
 ALTER TABLE cars SET (fillfactor = 70);
 
--- Для баз, створених поки brand_id був smallint. Ідемпотентно, тому init_db
--- може ганяти це щозапуску.
-ALTER TABLE cars ALTER COLUMN brand_id TYPE integer;
+-- Для баз, створених поки brand_id був smallint.
+--
+-- Умова тут не косметична. Голий ALTER ... TYPE бере ACCESS EXCLUSIVE і
+-- переписує таблицю ЩОРАЗУ, навіть коли міняти нема чого. Варто одному
+-- бекенду залишитись idle in transaction - і ALTER стає в чергу, а за ним
+-- у ту саму чергу стає кожен наступний запит до cars: база виглядає мертвою,
+-- хоча ніхто нічого не робить. Саме так воно одного разу і сталося.
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name = 'cars'
+          AND column_name = 'brand_id'
+          AND data_type = 'smallint'
+    ) THEN
+        ALTER TABLE cars ALTER COLUMN brand_id TYPE integer;
+    END IF;
+END $$;
 
 -- Під запити майбутнього ТГ-бота: марка+модель, ціна, рік, пробіг, місто.
 CREATE INDEX IF NOT EXISTS idx_cars_vin        ON cars (vin_masked) WHERE vin_masked IS NOT NULL;
