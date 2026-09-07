@@ -20,8 +20,6 @@ SCHEMA_PATH = Path(__file__).parent / "schema.sql"
 
 CAR_COLUMNS = (
     "car_id",
-    "source",
-    "fingerprint",
     "vin_masked",
     "title",
     "brand_id",
@@ -70,15 +68,6 @@ CAR_COLUMNS = (
 # вони різні у 96-98% рядків - з ними кожен прогін писав ~340 тис. рядків історії,
 # з яких змістовними були близько 1%. expires_at і promo_level рухаються так само
 # самі по собі й до змісту оголошення стосунку не мають.
-# Ознаки самої МАШИНИ - те, що не змінюється, поки це та сама машина. Ціни,
-# пробігу й статусу тут навмисно немає: вони рухаються, а відбиток має лишатись.
-IDENTITY_FIELDS = (
-    "vin_masked",
-    "brand_id",
-    "model_id",
-    "year",
-)
-
 HASHED_FIELDS = (
     "price_main",
     "currency",
@@ -106,7 +95,6 @@ UPSERT_CARS_SQL = """
 
 HISTORY_COLUMNS = (
     "car_id",
-    "source",
     "vin_masked",
     "price_main",
     "price_usd",
@@ -171,19 +159,6 @@ def _dig(source, *path):
     return current
 
 
-def _fingerprint(row):
-    """Відбиток машини для звʼязування між майданчиками й перевиставленнями.
-
-    None, якщо немає VIN: без нього збіг за маркою, моделлю й роком дав би
-    тисячі однакових відбитків на однотипних авто, і від такого ключа шкоди
-    більше, ніж користі.
-    """
-    if not row.get("vin_masked"):
-        return None
-    payload = "|".join(str(row.get(f)) for f in IDENTITY_FIELDS)
-    return hashlib.sha256(payload.encode("utf-8")).digest()
-
-
 def _hash(row):
     payload = json.dumps(
         [str(row.get(field)) for field in HASHED_FIELDS],
@@ -192,7 +167,7 @@ def _hash(row):
     return hashlib.sha256(payload.encode("utf-8")).digest()
 
 
-def build_row(car, source="auto.ria"):
+def build_row(car):
     """Розкласти одну машину з GraphQL у плаский словник під колонки cars.
 
     На вхід іде сирий обʼєкт advertisements(...) як він прийшов. Повертає None
@@ -211,8 +186,6 @@ def build_row(car, source="auto.ria"):
 
     row = {
         "car_id": car_id,
-        "source": source,
-        "fingerprint": None,          # рахується нижче, коли vin_masked уже на місці
         "vin_masked": _text(car.get("VIN")),
         "title": title,
         "brand_id": _int(_dig(car, "brand", "id")),
@@ -258,7 +231,6 @@ def build_row(car, source="auto.ria"):
         "published_at": _ts(_dig(car, "publication", "createdAt")),
         "expires_at": _ts(_dig(car, "publication", "expiredAt")),
     }
-    row["fingerprint"] = _fingerprint(row)
     row["data_hash"] = _hash(row)
     return row
 
@@ -284,7 +256,6 @@ def _history_tuple(row):
         snapshot[key] = value
     return (
         row["car_id"],
-        row["source"],
         row["vin_masked"],
         row["price_main"],
         row["price_usd"],
@@ -296,10 +267,10 @@ def _history_tuple(row):
     )
 
 
-def _data_recording_sync(cars, source):
+def _data_recording_sync(cars):
     rows, skipped = [], 0
     for car in cars:
-        row = build_row(car, source) if isinstance(car, dict) else None
+        row = build_row(car) if isinstance(car, dict) else None
         if row is None:
             skipped += 1
             continue
@@ -317,10 +288,10 @@ def _data_recording_sync(cars, source):
     return written, skipped, historied
 
 
-async def data_recording(cars, source="auto.ria"):
+async def data_recording(cars):
     if not cars:
         return 0, 0, 0
-    return await asyncio.to_thread(_data_recording_sync, cars, source)
+    return await asyncio.to_thread(_data_recording_sync, cars)
 
 
 def _init_db_sync():

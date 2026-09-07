@@ -364,20 +364,6 @@ CREATE TABLE IF NOT EXISTS cars (
     -- ідентифікації - ні: повний VIN є лише в ld+json на сторінці оголошення.
     vin_masked     text,
 
-    -- Майданчик, з якого прийшло оголошення. Кожен скрейпер пише своє значення.
-    source         text NOT NULL DEFAULT 'auto.ria',
-
-    -- Відбиток САМОЇ МАШИНИ, а не оголошення: sha256 по (vin_masked, brand_id,
-    -- model_id, year). Навмисно без ціни, пробігу й статусу - вони змінюються
-    -- у тієї самої машини, і від них відбиток став би марним.
-    --
-    -- Потрібен, щоб зшивати одне авто між майданчиками і між перевиставленнями.
-    -- Сам по собі vin_masked для цього не годиться: auto.ria ховає 5 із 17
-    -- символів, і на 320 тис. рядків це дало 20 250 груп, де під одним
-    -- маскованим VIN стоять РІЗНІ моделі. Додавання марки, моделі й року
-    -- прибирає всі ці колізії.
-    fingerprint    bytea,
-
     title          text NOT NULL,
 
     -- integer, а не smallint: у частини марок id за 55 000 (перевірено на
@@ -468,11 +454,6 @@ CREATE TABLE IF NOT EXISTS cars (
 -- сторінках місце під HOT-оновлення замість того, щоб розповзатися.
 ALTER TABLE cars SET (fillfactor = 70);
 
--- Для баз, створених до появи source/fingerprint.
-ALTER TABLE cars ADD COLUMN IF NOT EXISTS source text NOT NULL DEFAULT 'auto.ria';
-ALTER TABLE cars ADD COLUMN IF NOT EXISTS fingerprint bytea;
-ALTER TABLE car_history ADD COLUMN IF NOT EXISTS source text NOT NULL DEFAULT 'auto.ria';
-
 -- Для баз, створених до появи price_main. Умовно, щоб не брати блокування
 -- на порожньому місці (ADD COLUMN дешевий, але звичка корисна).
 ALTER TABLE cars ADD COLUMN IF NOT EXISTS price_main integer;
@@ -499,10 +480,6 @@ END $$;
 
 -- Під запити майбутнього ТГ-бота: марка+модель, ціна, рік, пробіг, місто.
 CREATE INDEX IF NOT EXISTS idx_cars_vin        ON cars (vin_masked) WHERE vin_masked IS NOT NULL;
--- Ядро пошуку дублів між майданчиками: одне авто на auto.ria й на otomoto
--- дасть однаковий fingerprint, і знайти пару буде одним JOIN-ом по цьому індексу.
-CREATE INDEX IF NOT EXISTS idx_cars_fingerprint ON cars (fingerprint) WHERE fingerprint IS NOT NULL;
-CREATE INDEX IF NOT EXISTS idx_cars_source      ON cars (source);
 CREATE INDEX IF NOT EXISTS idx_cars_brand      ON cars (brand_id, model_id);
 CREATE INDEX IF NOT EXISTS idx_cars_price      ON cars (price_usd);
 CREATE INDEX IF NOT EXISTS idx_cars_year       ON cars (year);

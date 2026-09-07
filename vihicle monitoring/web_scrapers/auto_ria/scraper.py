@@ -11,6 +11,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from core.db import DATABASE_CONNECTION, data_recording, init_db
 
+# Майданчик, який пише цей скрейпер. Кожен наступний ставить своє значення.
+SOURCE = "auto.ria"
+
 A = "https://auto.ria.com/api/search/auto"
 U = "https://auto.ria.com/graphql/"
 H = {
@@ -191,7 +194,7 @@ async def fetch_cars(client, ids):
         for car in (d.get("data") or {}).get("advertisements") or []
         if car and car.get("status") == "ACTIVE" and car.get("brand")
     ]
-    written, skipped, historied = await data_recording(cars)
+    written, skipped, historied = await data_recording(cars, source=SOURCE)
     print(f"  db:recorded {written}, skipped {skipped}, histored +{historied}")
 
 
