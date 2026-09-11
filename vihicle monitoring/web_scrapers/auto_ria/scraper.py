@@ -1,5 +1,4 @@
 import asyncio
-import json
 import random
 import sys
 from pathlib import Path
@@ -11,7 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from core.db import DATABASE_CONNECTION, data_recording, init_db
 
-# Майданчик, який пише цей скрейпер. Кожен наступний ставить своє значення.
+
 SOURCE = "auto.ria"
 
 A = "https://auto.ria.com/api/search/auto"
@@ -209,4 +208,4 @@ async def main():
                 tg.create_task(consume(client, queue))
 
 
-asyncio.run(main())
+asyncio.run(main(), loop_factory=asyncio.SelectorEventLoop)

@@ -172,12 +172,6 @@ def _dig(source, *path):
 
 
 def _fingerprint(row):
-    """Відбиток машини для звʼязування між майданчиками й перевиставленнями.
-
-    None, якщо немає VIN: без нього збіг за маркою, моделлю й роком дав би
-    тисячі однакових відбитків на однотипних авто, і від такого ключа шкоди
-    більше, ніж користі.
-    """
     if not row.get("vin_masked"):
         return None
     payload = "|".join(str(row.get(f)) for f in IDENTITY_FIELDS)
@@ -212,7 +206,7 @@ def build_row(car, source="auto.ria"):
     row = {
         "car_id": car_id,
         "source": source,
-        "fingerprint": None,          # рахується нижче, коли vin_masked уже на місці
+        "fingerprint": None,
         "vin_masked": _text(car.get("VIN")),
         "title": title,
         "brand_id": _int(_dig(car, "brand", "id")),
@@ -241,8 +235,6 @@ def build_row(car, source="auto.ria"):
         "seller_rating": _num(_dig(car, "owner", "rating", "average")),
         "seller_reviews": _int(_dig(car, "owner", "rating", "count")),
         "seller_company": company,
-        # Компанія в owner є лише в автосалонів, приватники її не мають -
-        # це найнадійніша ознака дилера з того, що віддає API.
         "is_dealer": bool(company),
         "photo_main": _text(_dig(car, "photos", "main", "url")),
         "photos": [
@@ -271,8 +263,6 @@ def _car_tuple(row):
 
 
 def _history_tuple(row):
-    # Знімок кладеться без bytea і без datetime/Decimal - jsonb їх не приймає,
-    # а відбиток і так лежить окремою колонкою.
     snapshot = {}
     for key, value in row.items():
         if key == "data_hash":
@@ -296,7 +286,7 @@ def _history_tuple(row):
     )
 
 
-def _data_recording_sync(cars, source):
+def _prepare(cars, source):
     rows, skipped = [], 0
     for car in cars:
         row = build_row(car, source) if isinstance(car, dict) else None
@@ -305,29 +295,39 @@ def _data_recording_sync(cars, source):
             continue
         rows.append(row)
     rows = list({row["car_id"]: row for row in rows}.values())
-    if not rows:
-        return 0, skipped, 0
-
-    with psycopg.connect(**DATABASE_CONNECTION) as connection:
-        with connection.cursor() as cursor:
-            cursor.executemany(UPSERT_CARS_SQL, [_car_tuple(r) for r in rows])
-            written = cursor.rowcount
-            cursor.executemany(INSERT_HISTORY_SQL, [_history_tuple(r) for r in rows])
-            historied = cursor.rowcount
-    return written, skipped, historied
+    return (
+        [_car_tuple(row) for row in rows],
+        [_history_tuple(row) for row in rows],
+        skipped,
+    )
 
 
 async def data_recording(cars, source="auto.ria"):
     if not cars:
         return 0, 0, 0
-    return await asyncio.to_thread(_data_recording_sync, cars, source)
 
+    car_rows, history_rows, skipped = await asyncio.to_thread(_prepare, cars, source)
+    if not car_rows:
+        return 0, skipped, 0
 
-def _init_db_sync():
-    with psycopg.connect(**DATABASE_CONNECTION) as connection:
-        connection.execute(SCHEMA_PATH.read_text(encoding="utf-8"))
+    async with await psycopg.AsyncConnection.connect(
+        **DATABASE_CONNECTION
+    ) as connection:
+        async with connection.cursor() as cursor:
+            await cursor.executemany(UPSERT_CARS_SQL, car_rows)
+            written = cursor.rowcount
+            await cursor.executemany(INSERT_HISTORY_SQL, history_rows)
+            historied = cursor.rowcount
+    return written, skipped, historied
 
 
 async def init_db():
     """Створити таблиці, якщо їх ще немає. Ідемпотентно, можна щозапуску."""
-    await asyncio.to_thread(_init_db_sync)
+    # execute() без параметрів іде простим протоколом (PQsendQuery), а він
+    # приймає весь schema.sql одним шматком - інакше довелось би різати
+    # файл на окремі оператори.
+    schema = await asyncio.to_thread(SCHEMA_PATH.read_text, encoding="utf-8")
+    async with await psycopg.AsyncConnection.connect(
+        **DATABASE_CONNECTION
+    ) as connection:
+        await connection.execute(schema)
