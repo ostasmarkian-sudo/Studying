@@ -1,22 +1,22 @@
--- Каталог auto.ria: поточний стан пропозицій + історія їхніх змін.
+-- auto.ria catalogue: current state of the offers plus the history of changes.
 --
--- Дані приходять з GraphQL advertisements(ids:[...]). У типі UsedAuto 37 полів,
--- але корисних менше: statistic, version і autoBuy без авторизації завжди NULL,
--- prices стосується оплати розміщення, а не машини. Тут лишилось те, за чим
--- має сенс шукати й рахувати.
+-- Data arrives from GraphQL advertisements(ids:[...]). The UsedAuto type has 37
+-- fields but fewer useful ones: statistic, version and autoBuy are always NULL
+-- without authorisation, and prices refers to paying for placement rather than
+-- to the car. What is left here is what makes sense to search and count on.
 --
--- Чого в API НЕМАЄ (перевірено інтроспекцією схеми):
---   * опису від продавця - поля немає в UsedAuto взагалі;
---   * ознаки пошкодження - Labels{damage} існує, але висить на типі InfoType,
---     який не повертає жоден запит; тип-сирота.
---   * історії цін від самого сайту - ChangesHistory теж на InfoType.
--- Перше й друге є лише на HTML-сторінці оголошення (ld+json), третє ми будуємо
--- самі - для цього й існує car_history.
+-- What the API does NOT have (verified by schema introspection):
+--   * the seller's description, that field is absent from UsedAuto entirely;
+--   * a damage flag, Labels{damage} exists but hangs on the InfoType type,
+--     which no query returns; an orphan type.
+--   * the site's own price history, ChangesHistory sits on InfoType as well.
+-- The first two live only on the HTML page of the ad (ld+json), the third we
+-- build ourselves, which is what car_history exists for.
 
 
--- Довідник типів кузова. Body в GraphQL віддає тільки {id}, без назви, тому
--- назви взяті з /api/categories/{id}/bodystyles і покладені сюди один раз:
--- інакше кожен запис довелось би супроводжувати мережевим запитом за словником.
+-- Body type dictionary. Body in GraphQL returns only {id} with no name, so the
+-- names were taken from /api/categories/{id}/bodystyles and put here once:
+-- otherwise every record would need a network round trip for the dictionary.
 CREATE TABLE IF NOT EXISTS body_types (
     body_id smallint PRIMARY KEY,
     name    text NOT NULL
@@ -352,49 +352,51 @@ INSERT INTO body_types (body_id, name) VALUES
 ON CONFLICT (body_id) DO UPDATE SET name = EXCLUDED.name;
 
 
--- Поточний стан кожного оголошення, один рядок на car_id.
+-- Current state of every ad, one row per car_id.
 CREATE TABLE IF NOT EXISTS cars (
-    -- id оголошення на auto.ria. Одна фізична машина може перевиставлятись під
-    -- новим id, тому "та сама машина" визначається не цим ключем, а vin_masked.
+    -- The ad id on auto.ria. One physical car can be relisted under a new id,
+    -- so "the same car" is decided by vin_masked rather than by this key.
     car_id         bigint PRIMARY KEY,
 
-    -- VIN приходить частково замаскованим: WA1LAAF7хHDхххх60 - видно 12 із 17
-    -- символів. Маска детермінована (перевірено: той самий рядок між запитами),
-    -- тож для звʼязування перевиставлень цього вистачає. Для юридичної
-    -- ідентифікації - ні: повний VIN є лише в ld+json на сторінці оголошення.
+    -- The VIN arrives partly masked: WA1LAAF7xHDxxxx60, 12 of 17 characters
+    -- are visible. The mask is deterministic (checked: the same string across
+    -- requests), so it is enough for linking relistings. Not enough for legal
+    -- identification: the full VIN is only in the ld+json on the ad page.
     vin_masked     text,
 
-    -- Майданчик, з якого прийшло оголошення. Кожен скрейпер пише своє значення.
+    -- Which marketplace the ad came from. Each scraper writes its own value.
     source         text NOT NULL DEFAULT 'auto.ria',
 
-    -- Відбиток САМОЇ МАШИНИ, а не оголошення: sha256 по (vin_masked, brand_id,
-    -- model_id, year). Навмисно без ціни, пробігу й статусу - вони змінюються
-    -- у тієї самої машини, і від них відбиток став би марним.
+    -- A print of the CAR itself, not of the ad: sha256 over (vin_masked,
+    -- brand_id, model_id, year). Deliberately without price, mileage or
+    -- status, since those change on the very same car and would make the
+    -- print useless.
     --
-    -- Потрібен, щоб зшивати одне авто між майданчиками і між перевиставленнями.
-    -- Сам по собі vin_masked для цього не годиться: auto.ria ховає 5 із 17
-    -- символів, і на 320 тис. рядків це дало 20 250 груп, де під одним
-    -- маскованим VIN стоять РІЗНІ моделі. Додавання марки, моделі й року
-    -- прибирає всі ці колізії.
+    -- It is what stitches one car across marketplaces and across relistings.
+    -- vin_masked alone will not do: auto.ria hides 5 of 17 characters, and
+    -- over 320k rows that produced 20,250 groups where DIFFERENT models sit
+    -- under one masked VIN. Adding brand, model and year removes every one of
+    -- those collisions.
     fingerprint    bytea,
 
     title          text NOT NULL,
 
-    -- integer, а не smallint: у частини марок id за 55 000 (перевірено на
-    -- живій видачі), тож двобайтове ціле переповнюється на першому ж батчі.
+    -- integer rather than smallint: some brands have ids past 55,000 (checked
+    -- against the live feed), so a two-byte integer overflows on batch one.
     brand_id       integer,
     brand          text,
     model_id       integer,
     model          text,
     category_id    smallint,
-    -- Навмисно БЕЗ FK на body_types: словник узятий зі знімка API, і якщо
-    -- завтра зʼявиться новий id кузова, порушення FK відкотило б увесь батч.
-    -- На цьому вже обпікся avnet - краще осиротілий id, ніж утрачена пачка.
+    -- Deliberately WITHOUT an FK to body_types: the dictionary is a snapshot
+    -- of the API, and if a new body id shows up tomorrow, the FK violation
+    -- would roll back the whole batch. avnet already burned us on this, an
+    -- orphaned id beats a lost batch.
     body_id        smallint,
     year           smallint,
 
-    -- API віддає пробіг у тисячах км (169 = 169 тис.), тут переведено в км.
-    -- Точність від цього не зростає - округлення до тисячі лишається.
+    -- The API gives mileage in thousands of km (169 = 169k), converted to km
+    -- here. That adds no precision, the rounding to a thousand stays.
     mileage_km     integer,
 
     fuel_id        smallint,
@@ -402,13 +404,15 @@ CREATE TABLE IF NOT EXISTS cars (
     gearbox        text,
     engine_liters  numeric(4, 2),
 
-    -- Ціна в трьох валютах приходить порахованою сервером, тому зберігаються всі
-    -- три: перерахунок постфактум за курсом дня дав би інші числа, ніж бачив
-    -- покупець. currency - валюта, у якій продавець виставив ціну.
-    -- Ціна В ТІЙ валюті, у якій її виставив продавець. Єдине число тут, яке
-    -- не рухається саме по собі: usd/uah/eur сервер перераховує за курсом при
-    -- кожному запиті, тому вони відрізняються між двома сусідніми прогонами
-    -- у 96-98% рядків і для виявлення реальної зміни ціни непридатні.
+    -- The price in three currencies arrives already computed by the server,
+    -- so all three are stored: recomputing later at the day's rate would give
+    -- different numbers than the buyer saw. currency is the one the seller
+    -- listed in.
+    -- The price IN THE currency the seller listed it in. The only number here
+    -- that does not move on its own: usd/uah/eur are recalculated by the
+    -- server at the current rate on every request, so they differ between two
+    -- neighbouring runs in 96-98% of rows and cannot be used to detect a real
+    -- price change.
     price_main     integer,
     price_usd      integer,
     price_uah      integer,
@@ -422,27 +426,28 @@ CREATE TABLE IF NOT EXISTS cars (
 
     seller_id      bigint,
     seller_name    text,
-    -- Rating.average non-nullable, а в ~86% продавців рейтингу немає, тому
-    -- сервер віддає помилку і обнуляє весь підобʼєкт. Тут це просто NULL.
+    -- Rating.average is non-nullable while ~86% of sellers have no rating, so
+    -- the server returns an error and nulls the whole subobject. Just NULL.
     seller_rating  numeric(3, 2),
     seller_reviews integer,
     seller_company text,
     is_dealer      boolean NOT NULL DEFAULT false,
 
-    -- photos.all стабільно віддає рівно 5 знімків, скільки б їх не було в
-    -- оголошенні. Повний список - тільки з ld+json сторінки.
+    -- photos.all consistently returns exactly 5 shots no matter how many the
+    -- ad holds. The full list comes only from the page's ld+json.
     photo_main     text,
     photos         jsonb NOT NULL DEFAULT '[]'::jsonb,
 
-    -- Сире значення поля custom. Судячи з фільтра customs_cleared на сайті,
-    -- 0 = розмитнений; мапінг не документований, тому число, а не boolean.
+    -- The raw value of the custom field. Judging by the customs_cleared
+    -- filter on the site, 0 = cleared; the mapping is undocumented, hence a
+    -- number rather than a boolean.
     customs_code   smallint,
     abroad         boolean,
     country_import smallint,
 
-    -- Рівень платного просування. Значення непослідовні (у видачі трапляються
-    -- і 52, і 80, і 112), тому зберігається як є. Корисний як ознака, що
-    -- оголошення підняте: такі частіше вгорі й частіше змінюють ціну.
+    -- Paid promotion level. The values are inconsistent (52, 80 and 112 all
+    -- turn up in the feed), so it is stored as is. Useful as a sign the ad is
+    -- promoted: those sit higher more often and change price more often.
     promo_level    smallint,
 
     status         text NOT NULL,
@@ -452,39 +457,40 @@ CREATE TABLE IF NOT EXISTS cars (
     published_at   timestamptz,
     expires_at     timestamptz,
 
-    -- sha256 по тих полях, що рухаються (ціна, статус, пробіг, промо-рівень).
-    -- Апсерт чіпає updated_at лише коли хеш змінився, і той самий хеш не
-    -- потрапляє двічі в car_history.
+    -- sha256 over the fields that move (price, status, mileage, promo level).
+    -- The upsert touches updated_at only when the hash changed, and the same
+    -- hash never lands in car_history twice.
     data_hash      bytea NOT NULL,
 
     first_seen_at  timestamptz NOT NULL DEFAULT now(),
     updated_at     timestamptz NOT NULL DEFAULT now(),
-    -- На відміну від updated_at, переписується щопрогону: відставання від now()
-    -- і є ознакою оголошення, яке зникло з видачі.
+    -- Unlike updated_at, rewritten on every run: falling behind now() is
+    -- precisely the sign of an ad that vanished from the feed.
     last_seen_at   timestamptz NOT NULL DEFAULT now()
 );
 
--- last_seen_at переписується для кожного рядка щопрогону, тож лишаємо на
--- сторінках місце під HOT-оновлення замість того, щоб розповзатися.
+-- last_seen_at is rewritten for every row on every run, so leave room on the
+-- pages for HOT updates instead of letting the table sprawl.
 ALTER TABLE cars SET (fillfactor = 70);
 
--- Для баз, створених до появи source/fingerprint.
+-- For databases created before source/fingerprint existed.
 ALTER TABLE cars ADD COLUMN IF NOT EXISTS source text NOT NULL DEFAULT 'auto.ria';
 ALTER TABLE cars ADD COLUMN IF NOT EXISTS fingerprint bytea;
 ALTER TABLE car_history ADD COLUMN IF NOT EXISTS source text NOT NULL DEFAULT 'auto.ria';
 
--- Для баз, створених до появи price_main. Умовно, щоб не брати блокування
--- на порожньому місці (ADD COLUMN дешевий, але звичка корисна).
+-- For databases created before price_main. Conditional so as not to take a
+-- lock for nothing (ADD COLUMN is cheap, but the habit is worth keeping).
 ALTER TABLE cars ADD COLUMN IF NOT EXISTS price_main integer;
 ALTER TABLE car_history ADD COLUMN IF NOT EXISTS price_main integer;
 
--- Для баз, створених поки brand_id був smallint.
+-- For databases created while brand_id was still smallint.
 --
--- Умова тут не косметична. Голий ALTER ... TYPE бере ACCESS EXCLUSIVE і
--- переписує таблицю ЩОРАЗУ, навіть коли міняти нема чого. Варто одному
--- бекенду залишитись idle in transaction - і ALTER стає в чергу, а за ним
--- у ту саму чергу стає кожен наступний запит до cars: база виглядає мертвою,
--- хоча ніхто нічого не робить. Саме так воно одного разу і сталося.
+-- The condition here is not cosmetic. A bare ALTER ... TYPE takes ACCESS
+-- EXCLUSIVE and rewrites the table EVERY time, even when there is nothing to
+-- change. Let one backend sit idle in transaction and the ALTER queues up,
+-- and behind it every subsequent query to cars joins the same queue: the
+-- database looks dead while nobody is doing anything. That is exactly how it
+-- happened once.
 DO $$
 BEGIN
     IF EXISTS (
@@ -497,10 +503,10 @@ BEGIN
     END IF;
 END $$;
 
--- Під запити майбутнього ТГ-бота: марка+модель, ціна, рік, пробіг, місто.
+-- For the future Telegram bot: brand+model, price, year, mileage, city.
 CREATE INDEX IF NOT EXISTS idx_cars_vin        ON cars (vin_masked) WHERE vin_masked IS NOT NULL;
--- Ядро пошуку дублів між майданчиками: одне авто на auto.ria й на otomoto
--- дасть однаковий fingerprint, і знайти пару буде одним JOIN-ом по цьому індексу.
+-- The core of cross-marketplace duplicate search: one car on auto.ria and on
+-- otomoto yields the same fingerprint, and finding the pair is a single JOIN.
 CREATE INDEX IF NOT EXISTS idx_cars_fingerprint ON cars (fingerprint) WHERE fingerprint IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_cars_source      ON cars (source);
 CREATE INDEX IF NOT EXISTS idx_cars_brand      ON cars (brand_id, model_id);
@@ -509,25 +515,26 @@ CREATE INDEX IF NOT EXISTS idx_cars_year       ON cars (year);
 CREATE INDEX IF NOT EXISTS idx_cars_mileage    ON cars (mileage_km);
 CREATE INDEX IF NOT EXISTS idx_cars_city       ON cars (city_id);
 CREATE INDEX IF NOT EXISTS idx_cars_updated    ON cars (updated_at DESC);
--- Часткові: покривають лише робочу частину таблиці, тому важать копійки.
+-- Partial: they cover only the working part of the table, so they cost little.
 CREATE INDEX IF NOT EXISTS idx_cars_active     ON cars (last_seen_at) WHERE status = 'ACTIVE';
 CREATE INDEX IF NOT EXISTS idx_cars_search     ON cars (brand_id, model_id, year, price_usd) WHERE status = 'ACTIVE';
 
 
--- Історія пропозицій: по рядку на кожен помічений стан оголошення.
+-- Offer history: one row per observed state of an ad.
 --
--- Пишеться лише тоді, коли data_hash змінився, тому таблиця росте від реальних
--- змін ціни чи статусу, а не від кількості прогонів.
+-- Written only when data_hash changed, so the table grows with real price or
+-- status changes rather than with the number of runs.
 CREATE TABLE IF NOT EXISTS car_history (
     history_id  bigserial PRIMARY KEY,
 
-    -- Навмисно БЕЗ FK на cars: історія має пережити зникнення оголошення з
-    -- активної таблиці, інакше вона втратить сенс саме тоді, коли стає цікавою.
+    -- Deliberately WITHOUT an FK to cars: the history has to outlive the ad's
+    -- removal from the active table, or it loses its point exactly when it
+    -- starts being interesting.
     car_id      bigint NOT NULL,
 
-    -- Другий ключ звʼязку. Коли ту саму машину виставляють заново під новим
-    -- car_id, спільним лишається лише він - за ним і зшивається історія
-    -- перепродажів: SELECT ... WHERE vin_masked = ... ORDER BY recorded_at.
+    -- The second linking key. When the same car is relisted under a new
+    -- car_id, this is all that stays shared, and it is what stitches the
+    -- resale history: SELECT ... WHERE vin_masked = ... ORDER BY recorded_at.
     vin_masked  text,
 
     price_usd   integer,
@@ -535,18 +542,40 @@ CREATE TABLE IF NOT EXISTS car_history (
     status      text,
     promo_level smallint,
 
-    -- Повний знімок рядка на той момент: схема cars ще змінюватиметься, а
-    -- історію переписати заднім числом не вийде.
+    -- A full snapshot of the row at that moment: the cars schema will keep
+    -- changing, and history cannot be rewritten after the fact.
     snapshot    jsonb NOT NULL,
 
     data_hash   bytea NOT NULL,
     recorded_at timestamptz NOT NULL DEFAULT now(),
 
-    -- Ось цей ключ і робить дедуплікацію: повторний прогін з тим самим станом
-    -- нічого не додасть, бо (car_id, data_hash) вже є.
+    -- This key is what deduplicates: a repeat run with the same state adds
+    -- nothing, because (car_id, data_hash) is already there.
     UNIQUE (car_id, data_hash)
 );
 
 CREATE INDEX IF NOT EXISTS idx_hist_car   ON car_history (car_id, recorded_at DESC);
 CREATE INDEX IF NOT EXISTS idx_hist_vin   ON car_history (vin_masked, recorded_at DESC) WHERE vin_masked IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_hist_time  ON car_history (recorded_at DESC);
+
+
+-- The incremental scan boundary. order_by=7 in search sorts strictly by the
+-- ad's bump time, and that very time is what arrives in createdAt. So the
+-- boundary is kept as a time, not as the last id: ids in the feed are not
+-- ordered, and any single ad can vanish from it or float up after a bump.
+--
+-- boundary_at is the head time of the feed as of the PREVIOUS completed run.
+-- Written only once a run reached the boundary or the end of the category: an
+-- interrupted run has no right to move it, otherwise the range it did not
+-- manage to collect is lost for good.
+CREATE TABLE IF NOT EXISTS scan_state (
+    source      text NOT NULL,
+    category_id smallint NOT NULL,
+    boundary_at timestamptz NOT NULL,
+    finished_at timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (source, category_id)
+);
+
+-- For reading the boundary and for the weekly pass over vanished ads.
+CREATE INDEX IF NOT EXISTS idx_cars_cat_listed ON cars (category_id, listed_at DESC);
+CREATE INDEX IF NOT EXISTS idx_cars_seen       ON cars (source, last_seen_at) WHERE status = 'ACTIVE';

@@ -1,6 +1,7 @@
 import asyncio
 import random
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 import httpx
@@ -8,7 +9,16 @@ import psycopg
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from core.db import DATABASE_CONNECTION, data_recording, init_db
+from core.db import (
+    DATABASE_CONNECTION,
+    data_recording,
+    init_db,
+    mark_gone,
+    read_boundary,
+    stale_active,
+    touch_seen,
+    write_boundary,
+)
 
 
 SOURCE = "auto.ria"
@@ -36,6 +46,8 @@ Q = """query($ids:[ID],$lang:ID){ advertisements(ids:$ids, langId:$lang){
   levels{active{value}} country{id}
 }}"""
 
+QT = "query($ids:[ID],$lang:ID){advertisements(ids:$ids,langId:$lang){id createdAt}}"
+
 LIMIT = 500
 URL = "https://auto.ria.com/uk/search/"
 TIMEOUT = httpx.Timeout(connect=10.0, read=90.0, write=10.0, pool=60.0)
@@ -61,7 +73,14 @@ headers = {
 
 QUEUE_MAXSIZE = 8
 GQL_BATCH = 500
+CHUNKS_PER_BATCH = 5
 CONSUMERS = 3
+# Site ceiling: countpage above 100 is silently rounded back down to 100.
+COUNTPAGE = 100
+# How many pages an incremental run may walk without finding the boundary.
+# Not an optimisation but a stopgap: without it any mistake in the boundary
+# costs a full crawl, and that is over three thousand pages for one category.
+MAX_PAGES = 200
 
 queue = asyncio.Queue(maxsize=QUEUE_MAXSIZE)
 
@@ -82,10 +101,30 @@ async def request(client, method, url, retries=5, **kwargs):
             last = e
         delay = 2**attempt + random.uniform(0, 1)
         print(
-            f"    retry {attempt + 1}/{retries} за {delay:.1f}s ({type(last).__name__})"
+            f"    retry {attempt + 1}/{retries} in {delay:.1f}s ({type(last).__name__})"
         )
         await asyncio.sleep(delay)
     raise last
+
+
+async def page_time(client, car_id):
+    """Bump time of a single listing.
+
+    order_by=7 sorts the feed by exactly this field, so the time of the last id
+    on a page tells us where we currently stand in the stream. The request is
+    kept separate and deliberately narrow: one id, two fields.
+    """
+    r = await request(
+        client,
+        "POST",
+        U,
+        json={"query": QT, "variables": {"ids": [str(car_id)], "lang": 4}},
+    )
+    ads = (r.json().get("data") or {}).get("advertisements") or []
+    stamp = ads[0].get("createdAt") if ads and ads[0] else None
+    if not stamp:
+        return None
+    return datetime.fromtimestamp(int(stamp) / 1000, tz=timezone.utc)
 
 
 async def fetch_ids(
@@ -94,16 +133,21 @@ async def fetch_ids(
     categories=range(1, 11),
     full=False,
 ):
+    """Collect ids from the feed and put them on the queue.
+
+    The incremental boundary is a TIME, not the last recorded id. Feed order is
+    set by bump time, so no single listing can be trusted as a marker: if it
+    disappears the scan runs to the end of the site, and if it gets bumped the
+    scan cuts off early and silently loses everything below it.
+    """
     total = 0
-    with psycopg.connect(**DATABASE_CONNECTION) as conn:
+    async with await psycopg.AsyncConnection.connect(
+        **DATABASE_CONNECTION, autocommit=True
+    ) as conn:
         for category_id in categories:
-            row = conn.execute(
-                """select car_id from cars
-                   where category_id = %s and listed_at is not null
-                   order by listed_at desc limit 1""",
-                (category_id,),
-            ).fetchone()
-            stop_at = None if full else (str(row[0]) if row else None)
+            boundary = None if full else await read_boundary(conn, SOURCE, category_id)
+            head_at = None
+            reached = False
             page = 0
             while True:
                 r = await request(
@@ -113,36 +157,58 @@ async def fetch_ids(
                     params={
                         "category_id": category_id,
                         "page": page,
-                        "countpage": 100,
+                        "countpage": COUNTPAGE,
                         "order_by": 7,
                     },
                 )
                 batch = r.json()["result"]["search_result"]["ids"]
-
                 if not batch:
+                    reached = True
                     break
-                if stop_at in batch:
-                    batch = batch[: batch.index(stop_at)]
-                    if batch:
-                        await queue.put(batch)
-                        total += len(batch)
-                        print(f"cat {category_id} page {page}: +{len(batch)}")
-                    break
+
+                # Take the head before handing the page over: this is the
+                # next boundary, and it has to be the time the run STARTED, or
+                # whatever appears while we walk down is lost to the next run.
+                if head_at is None:
+                    head_at = await page_time(client, batch[0])
+
                 await queue.put(batch)
                 total += len(batch)
-                page += 1
+                if full:
+                    await touch_seen(conn, batch)
                 print(
-                    f"cat {category_id} page {page}: +{len(batch)} (queue {queue.qsize()})"
+                    f"cat {category_id} page {page}: +{len(batch)} "
+                    f"(queue {queue.qsize()})"
                 )
+                page += 1
+
+                if boundary is not None:
+                    tail_at = await page_time(client, batch[-1])
+                    if tail_at is not None and tail_at <= boundary:
+                        print(f"cat {category_id}: boundary at page {page - 1}")
+                        reached = True
+                        break
+                    if page >= MAX_PAGES:
+                        print(
+                            f"cat {category_id}: hit the {MAX_PAGES} page "
+                            "ceiling, no boundary in sight, needs --sweep"
+                        )
+                        break
+
+            # Move the boundary only after a category closed honestly. A run
+            # that hit the ceiling leaves the old one in place: otherwise the
+            # gap it failed to collect would never be collected by anyone.
+            if reached and head_at is not None:
+                await write_boundary(conn, SOURCE, category_id, head_at)
         print(f"finished: {total} id")
 
 
-async def drain(queue, limit=GQL_BATCH):
+async def drain(queue, chunks=CHUNKS_PER_BATCH):
     batch = await queue.get()
     if batch is None:
         return None
     ids = list(batch)
-    while len(ids) < limit:
+    for _ in range(chunks - 1):
         try:
             nxt = queue.get_nowait()
         except asyncio.QueueEmpty:
@@ -151,7 +217,7 @@ async def drain(queue, limit=GQL_BATCH):
             try:
                 queue.put_nowait(None)
             except asyncio.QueueFull:
-                pass
+                await queue.put(None)
             break
         ids += nxt
     return ids
@@ -178,12 +244,15 @@ async def produce(
             try:
                 queue.put_nowait(None)
             except asyncio.QueueFull:
-                break
+                await queue.put(None)
 
 
 async def fetch_cars(client, ids):
     r = await request(
-        client, "POST", U, json={"query": Q, "variables": {"ids": ids[:500], "lang": 4}}
+        client,
+        "POST",
+        U,
+        json={"query": Q, "variables": {"ids": ids[:GQL_BATCH], "lang": 4}},
     )
     d = r.json()
     if "errors" in d:
@@ -197,15 +266,82 @@ async def fetch_cars(client, ids):
     print(f"  db:recorded {written}, skipped {skipped}, histored +{historied}")
 
 
-async def main():
+async def recheck(client, ids):
+    """Find out what happened to listings that vanished from the feed.
+
+    The ACTIVE filter that fetch_cars applies is deliberately absent here: the
+    inactive status is exactly what we are after. The API reports it honestly,
+    ARCHIVED, REMOVED_BY_CRON and the like, so the reason needs no guessing.
+    """
+    r = await request(
+        client,
+        "POST",
+        U,
+        json={"query": Q, "variables": {"ids": [str(i) for i in ids], "lang": 4}},
+    )
+    d = r.json()
+    cars = [
+        car
+        for car in (d.get("data") or {}).get("advertisements") or []
+        if car and car.get("title")
+    ]
+    await data_recording(cars, source=SOURCE)
+    answered = {int(car["id"]) for car in cars if car.get("id")}
+    lost = [i for i in ids if int(i) not in answered]
+    await mark_gone(lost, SOURCE)
+    return len(cars), len(lost)
+
+
+async def sweep(categories=range(1, 11)):
+    """Full crawl that clears out sold listings. Meant to run weekly.
+
+    Search returns live listings only, so a sold one never shows up in the feed
+    at all: it cannot be found, only its absence can be noticed. Hence the
+    order of work. Walk everything and keep last_seen_at fresh, after which the
+    active rows with a stale last_seen_at are exactly the ones that went away.
+    """
+    started_at = datetime.now(timezone.utc)
     async with httpx.AsyncClient(
         headers=headers, limits=LIMITS, timeout=TIMEOUT
     ) as client:
         await init_db()
         async with asyncio.TaskGroup() as tg:
-            tg.create_task(produce(client, queue))
+            tg.create_task(produce(client, queue, categories, full=True))
             for _ in range(CONSUMERS):
                 tg.create_task(consume(client, queue))
 
+        missing = await stale_active(started_at, SOURCE, categories)
+        print(f"sweep: {len(missing)} gone from the feed, checking statuses")
+        closed = lost = 0
+        for start in range(0, len(missing), GQL_BATCH):
+            chunk = missing[start : start + GQL_BATCH]
+            try:
+                done, gone = await recheck(client, chunk)
+            except Exception as e:
+                print(f"  recheck skiped {len(chunk)}: {type(e).__name__}")
+                continue
+            closed += done
+            lost += gone
+            print(f"  recheck {closed + lost}/{len(missing)}")
+        print(f"sweep: {closed} statuses refreshed, {lost} marked GONE")
 
-asyncio.run(main(), loop_factory=asyncio.SelectorEventLoop)
+
+async def main():
+    try:
+        async with httpx.AsyncClient(
+            headers=headers, limits=LIMITS, timeout=TIMEOUT
+        ) as client:
+            await init_db()
+            async with asyncio.TaskGroup() as tg:
+                tg.create_task(produce(client, queue))
+                for _ in range(CONSUMERS):
+                    tg.create_task(consume(client, queue))
+    except KeyboardInterrupt:
+        print("The scraper has been forcibly shut down")
+
+
+if __name__ == "__main__":
+    # --sweep: full crawl that clears out sold listings, run it weekly.
+    # no flag: the ordinary incremental run up to the boundary.
+    entry = sweep() if "--sweep" in sys.argv else main()
+    asyncio.run(entry, loop_factory=asyncio.SelectorEventLoop)

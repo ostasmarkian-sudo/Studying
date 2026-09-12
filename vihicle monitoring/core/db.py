@@ -65,13 +65,14 @@ CAR_COLUMNS = (
     "data_hash",
 )
 
-# Тільки те, що змінює ПРОДАВЕЦЬ. price_uah/price_eur/price_usd сюди не входять:
-# сервер перераховує їх за курсом на кожен запит, і між двома сусідніми прогонами
-# вони різні у 96-98% рядків - з ними кожен прогін писав ~340 тис. рядків історії,
-# з яких змістовними були близько 1%. expires_at і promo_level рухаються так само
-# самі по собі й до змісту оголошення стосунку не мають.
-# Ознаки самої МАШИНИ - те, що не змінюється, поки це та сама машина. Ціни,
-# пробігу й статусу тут навмисно немає: вони рухаються, а відбиток має лишатись.
+# Only what the SELLER changes. price_uah/price_eur/price_usd are left out:
+# the server recalculates them at the current rate on every request, so between
+# two neighbouring runs they differ in 96-98% of rows. With them in, each run
+# wrote ~340k history rows of which about 1% carried meaning. expires_at and
+# promo_level drift on their own the same way and say nothing about the ad.
+# Traits of the CAR itself, the ones that hold while it is still the same car.
+# Price, mileage and status are deliberately absent: they move, the print must
+# not.
 IDENTITY_FIELDS = (
     "vin_masked",
     "brand_id",
@@ -187,18 +188,19 @@ def _hash(row):
 
 
 def build_row(car, source="auto.ria"):
-    """Розкласти одну машину з GraphQL у плаский словник під колонки cars.
+    """Flatten one GraphQL car into a dict shaped like the cars columns.
 
-    На вхід іде сирий обʼєкт advertisements(...) як він прийшов. Повертає None
-    для запису без car_id або без title: перше - ключ апсерта, друге приходить
-    порожнім у неіснуючих id, які лишають по собі обʼєкт із самих None.
+    Takes the raw advertisements(...) object exactly as it arrived. Returns
+    None for a record with no car_id or no title: the first is the upsert key,
+    the second comes back empty for ids that do not exist, which leave behind
+    an object of nothing but None.
     """
     car_id = _int(car.get("id"))
     title = _text(car.get("title"))
     if car_id is None or title is None:
         return None
 
-    # У API пробіг у тисячах км (169 = 169 тис.), у базі - в км.
+    # The API gives mileage in thousands of km (169 = 169k), the db in km.
     mileage = _int(car.get("race"))
     uri = _text(car.get("uri"))
     company = _text(_dig(car, "owner", "company", "name"))
@@ -265,7 +267,7 @@ def _car_tuple(row):
 def _history_tuple(row):
     snapshot = {}
     for key, value in row.items():
-        if key == "data_hash":
+        if key in ("data_hash", "fingerprint"):
             continue
         if isinstance(value, datetime):
             value = value.isoformat()
@@ -322,12 +324,83 @@ async def data_recording(cars, source="auto.ria"):
 
 
 async def init_db():
-    """Створити таблиці, якщо їх ще немає. Ідемпотентно, можна щозапуску."""
-    # execute() без параметрів іде простим протоколом (PQsendQuery), а він
-    # приймає весь schema.sql одним шматком - інакше довелось би різати
-    # файл на окремі оператори.
+    """Create the tables if they are missing. Idempotent, safe on every run."""
+    # execute() without parameters goes over the simple protocol (PQsendQuery),
+    # and that one accepts the whole schema.sql in a single piece. Otherwise
+    # the file would have to be cut into separate statements.
     schema = await asyncio.to_thread(SCHEMA_PATH.read_text, encoding="utf-8")
     async with await psycopg.AsyncConnection.connect(
         **DATABASE_CONNECTION
     ) as connection:
         await connection.execute(schema)
+
+
+SCAN_STATE_SQL = """
+    INSERT INTO scan_state (source, category_id, boundary_at)
+    VALUES (%s, %s, %s)
+    ON CONFLICT (source, category_id) DO UPDATE SET
+        boundary_at = EXCLUDED.boundary_at,
+        finished_at = now()
+"""
+
+
+async def read_boundary(connection, source, category_id):
+    """Head time of the feed as of the last completed run, or None."""
+    cursor = await connection.execute(
+        "SELECT boundary_at FROM scan_state WHERE source = %s AND category_id = %s",
+        (source, category_id),
+    )
+    row = await cursor.fetchone()
+    return row[0] if row else None
+
+
+async def write_boundary(connection, source, category_id, boundary_at):
+    await connection.execute(SCAN_STATE_SQL, (source, category_id, boundary_at))
+
+
+async def touch_seen(connection, ids):
+    """Mark that these ids are still present in the feed.
+
+    Kept deliberately apart from writing the data: if GraphQL fails on a batch,
+    the cars still stay marked as alive and the weekly pass will not bury them
+    by mistake.
+    """
+    await connection.execute(
+        "UPDATE cars SET last_seen_at = now() WHERE car_id = ANY(%s)",
+        ([int(i) for i in ids],),
+    )
+
+
+async def stale_active(started_at, source="auto.ria", categories=None):
+    """Rows still active in the db that a full crawl never met in the feed."""
+    sql = """SELECT car_id FROM cars
+             WHERE source = %s AND status = 'ACTIVE' AND last_seen_at < %s"""
+    params = [source, started_at]
+    if categories is not None:
+        sql += " AND category_id = ANY(%s)"
+        params.append([int(c) for c in categories])
+    async with await psycopg.AsyncConnection.connect(
+        **DATABASE_CONNECTION
+    ) as connection:
+        cursor = await connection.execute(sql, params)
+        return [row[0] for row in await cursor.fetchall()]
+
+
+async def mark_gone(ids, source="auto.ria"):
+    """Last resort for the ids GraphQL answered nothing at all about.
+
+    The GONE status says only "vanished from the feed and cannot be checked".
+    When the API does answer, no reason has to be written by hand: it reports
+    ARCHIVED, REMOVED_BY_CRON or SOLD itself, and that beats any guess.
+    """
+    if not ids:
+        return 0
+    async with await psycopg.AsyncConnection.connect(
+        **DATABASE_CONNECTION
+    ) as connection:
+        cursor = await connection.execute(
+            """UPDATE cars SET status = 'GONE', updated_at = now()
+               WHERE source = %s AND car_id = ANY(%s) AND status = 'ACTIVE'""",
+            (source, [int(i) for i in ids]),
+        )
+        return cursor.rowcount
