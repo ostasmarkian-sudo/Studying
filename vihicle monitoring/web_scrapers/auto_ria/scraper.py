@@ -37,7 +37,7 @@ Q = """query($ids:[ID],$lang:ID){ advertisements(ids:$ids, langId:$lang){
   id createdAt year race VIN uri title custom abroad status
   brand{id name} model{id name} body{id} category{id name}
   fuel{id name} gearbox{name}
-  engine{volume{liters}}
+  engine{volume{liters} power{hp kW}}
   price{main{value currency{sign}} all{USD{value} UAH{value} EUR{value}}}
   location{city{id name} state{id name}}
   photos{main{url} all{url}}

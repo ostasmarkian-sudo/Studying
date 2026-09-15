@@ -36,6 +36,8 @@ CAR_COLUMNS = (
     "fuel",
     "gearbox",
     "engine_liters",
+    "power_hp",
+    "power_kw",
     "price_main",
     "price_usd",
     "price_uah",
@@ -144,6 +146,39 @@ def _int(value):
         return None
 
 
+# Nothing on auto.ria makes this, ships included. Above it the number is not
+# power at all: an electric scooter listed as "2720" is watts, and the rest is
+# simply mistyped. Measured on 1000 live ads, it drops 2 of 344 filled values.
+POWER_CEILING = 2000
+
+
+def _power(value):
+    """Engine power, or None where the number cannot be power.
+
+    The API reports the unknown as a 0 rather than a null (checked on live
+    ads), and a zero would quietly pass every "from X hp" filter and pull the
+    averages down.
+    """
+    number = _int(value)
+    if not number or number < 0 or number > POWER_CEILING:
+        return None
+    return number
+
+
+def _sane_power(hp, kw, liters):
+    """Drop the pair where the seller typed the displacement into power.
+
+    A "Lada 2108" with 1.5 l and 1500 hp, an Opel Kadett with 1.3 l and 1300.
+    The value matches the displacement in cc exactly, which is what makes it
+    safe to catch: no 1.5 litre car makes 1500 hp. kW goes out together with
+    it, the site computes that one from hp and so repeats the same mistake.
+    About 1.5% of the ads that have power at all.
+    """
+    if hp and liters and hp == round(float(liters) * 1000):
+        return None, None
+    return hp, kw
+
+
 def _num(value):
     if value is None or value == "":
         return None
@@ -205,6 +240,13 @@ def build_row(car, source="auto.ria"):
     uri = _text(car.get("uri"))
     company = _text(_dig(car, "owner", "company", "name"))
 
+    liters = _num(_dig(car, "engine", "volume", "liters"))
+    power_hp, power_kw = _sane_power(
+        _power(_dig(car, "engine", "power", "hp")),
+        _power(_dig(car, "engine", "power", "kW")),
+        liters,
+    )
+
     row = {
         "car_id": car_id,
         "source": source,
@@ -222,7 +264,9 @@ def build_row(car, source="auto.ria"):
         "fuel_id": _int(_dig(car, "fuel", "id")),
         "fuel": _text(_dig(car, "fuel", "name")),
         "gearbox": _text(_dig(car, "gearbox", "name")),
-        "engine_liters": _num(_dig(car, "engine", "volume", "liters")),
+        "engine_liters": liters,
+        "power_hp": power_hp,
+        "power_kw": power_kw,
         "price_main": _int(_dig(car, "price", "main", "value")),
         "price_usd": _int(_dig(car, "price", "all", "USD", "value")),
         "price_uah": _int(_dig(car, "price", "all", "UAH", "value")),

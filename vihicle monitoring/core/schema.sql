@@ -404,6 +404,23 @@ CREATE TABLE IF NOT EXISTS cars (
     gearbox        text,
     engine_liters  numeric(4, 2),
 
+    -- engine{power{hp kW}} in GraphQL. Filled in roughly 40% of the ads
+    -- (measured on 450 across categories), and where it is missing the API
+    -- sends a zero instead of null, so build_row turns that zero into NULL: a
+    -- car with 0 hp does not exist, and the zeros would drag every average
+    -- down. What the seller types is not checked by the site either, so
+    -- db.py throws out the displacement typed into the power box (1.5 l and
+    -- "1500 hp") and anything above 2000.
+    --
+    -- Deliberately outside the change hash: power belongs to the car, not to
+    -- the ad, so it has no business writing history rows.
+    --
+    -- Still dirty despite that: an electric scooter under 2000 carries watts,
+    -- not horsepower. Category 2 with an electric fuel needs its own rule,
+    -- there is no way to tell a 1200 W scooter from 1200 hp by the number.
+    power_hp       smallint,
+    power_kw       smallint,
+
     -- The price in three currencies arrives already computed by the server,
     -- so all three are stored: recomputing later at the day's rate would give
     -- different numbers than the buyer saw. currency is the one the seller
@@ -483,6 +500,12 @@ ALTER TABLE car_history ADD COLUMN IF NOT EXISTS source text NOT NULL DEFAULT 'a
 ALTER TABLE cars ADD COLUMN IF NOT EXISTS price_main integer;
 ALTER TABLE car_history ADD COLUMN IF NOT EXISTS price_main integer;
 
+-- For databases created before engine power was collected. The columns fill
+-- themselves on the next pass: the upsert writes every updatable column no
+-- matter whether data_hash moved.
+ALTER TABLE cars ADD COLUMN IF NOT EXISTS power_hp smallint;
+ALTER TABLE cars ADD COLUMN IF NOT EXISTS power_kw smallint;
+
 -- For databases created while brand_id was still smallint.
 --
 -- The condition here is not cosmetic. A bare ALTER ... TYPE takes ACCESS
@@ -513,6 +536,9 @@ CREATE INDEX IF NOT EXISTS idx_cars_brand      ON cars (brand_id, model_id);
 CREATE INDEX IF NOT EXISTS idx_cars_price      ON cars (price_usd);
 CREATE INDEX IF NOT EXISTS idx_cars_year       ON cars (year);
 CREATE INDEX IF NOT EXISTS idx_cars_mileage    ON cars (mileage_km);
+-- Partial: about 60% of the rows have no power at all, and they have no place
+-- in an index nobody will search through.
+CREATE INDEX IF NOT EXISTS idx_cars_power      ON cars (power_hp) WHERE power_hp IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_cars_city       ON cars (city_id);
 CREATE INDEX IF NOT EXISTS idx_cars_updated    ON cars (updated_at DESC);
 -- Partial: they cover only the working part of the table, so they cost little.

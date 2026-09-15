@@ -9,6 +9,7 @@ from aiogram.types import Message
 import logging
 from aiogram.enums import ParseMode
 from handler import router
+from database import init_bot_db
 from dotenv import load_dotenv
 
 dp = Dispatcher()
@@ -18,6 +19,7 @@ logging.basicConfig(level=logging.INFO)  # .
 
 
 async def main():
+    await init_bot_db()
     dp.include_router(router)
     bot = Bot(TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     await dp.start_polling(
@@ -25,4 +27,6 @@ async def main():
     )
 
 
-asyncio.run(main())
+# psycopg's async connection does not work on the Proactor loop, the Windows
+# default. On Linux the selector loop is the default anyway.
+asyncio.run(main(), loop_factory=asyncio.SelectorEventLoop)
