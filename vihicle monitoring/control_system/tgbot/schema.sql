@@ -78,3 +78,22 @@ CREATE TABLE IF NOT EXISTS car_watches (
 );
 
 CREATE INDEX IF NOT EXISTS idx_watches_car ON car_watches (car_id) WHERE is_active;
+
+
+-- What has already been sent for a subscription.
+--
+-- The notifier cannot rely on last_checked_at alone. cars.first_seen_at holds
+-- the start time of the scraper transaction, and the row only becomes visible
+-- when that transaction commits seconds later, so a check that ran in between
+-- would step over it forever. The notifier therefore looks back further than
+-- last_checked_at, and this table is what keeps the overlap from resending.
+CREATE TABLE IF NOT EXISTS sent_cars (
+    subscription_id bigint NOT NULL REFERENCES search_subscriptions ON DELETE CASCADE,
+    car_id          bigint NOT NULL,
+    sent_at         timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (subscription_id, car_id)
+);
+
+-- first_seen_at of a car never changes, so once a car falls out of the look-back
+-- window it can never come back into it: old rows here are dead weight.
+CREATE INDEX IF NOT EXISTS idx_sent_cars_time ON sent_cars (sent_at);

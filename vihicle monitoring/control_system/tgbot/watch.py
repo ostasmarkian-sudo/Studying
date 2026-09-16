@@ -6,6 +6,7 @@ from aiogram.filters import StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, Message
+from aiogram.utils.text_decorations import html_decoration as fmt
 
 import common
 import database as db
@@ -43,14 +44,18 @@ def _car_id(text):
 
 
 def _car_text(car):
-    title = escape(car["title"])
+    # fmt.quote escapes only < > &, which is all Telegram decodes. html.escape
+    # would also turn an apostrophe into &#x27; and show it to the user as it
+    # is. Inside the href the full escape stays: a quote there would break out
+    # of the attribute.
+    title = fmt.quote(car["title"])
     if car["url"]:
         title = f'<a href="{escape(car["url"])}">{title}</a>'
     details = []
     if car["price_usd"]:
         details.append(f"${car['price_usd']:,}".replace(",", " "))
     if car["city"]:
-        details.append(escape(car["city"]))
+        details.append(fmt.quote(car["city"]))
     question = (
         "Ви вже стежите за цим авто, події можна змінити:"
         if car["watched"]
@@ -154,7 +159,7 @@ async def start_watch(call: CallbackQuery, state: FSMContext):
     header = "Моніторинг оновлено" if result == "updated" else "Моніторинг запущено"
     lines = "\n".join(f"• {kb.WATCH_EVENTS[e]}" for e in events)
     await common.edit(
-        call, f"🔔 <b>{header}</b>\n{escape(data.get('title', ''))}\n\n{lines}"
+        call, f"🔔 <b>{header}</b>\n{fmt.quote(data.get('title', ''))}\n\n{lines}"
     )
     await call.answer()
 

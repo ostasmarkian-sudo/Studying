@@ -11,6 +11,7 @@ from aiogram.enums import ParseMode
 from handler import router
 from database import init_bot_db
 from dotenv import load_dotenv
+import notifier
 
 dp = Dispatcher()
 load_dotenv(Path(__file__).parent / ".env")
@@ -22,6 +23,9 @@ async def main():
     await init_bot_db()
     dp.include_router(router)
     bot = Bot(TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+    # Runs alongside the polling: checks the database for new cars and sends
+    # them to whoever subscribed. Dies with the process.
+    asyncio.create_task(notifier.run(bot))
     await dp.start_polling(
         bot,
     )

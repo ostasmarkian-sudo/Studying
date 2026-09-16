@@ -544,6 +544,10 @@ CREATE INDEX IF NOT EXISTS idx_cars_updated    ON cars (updated_at DESC);
 -- Partial: they cover only the working part of the table, so they cost little.
 CREATE INDEX IF NOT EXISTS idx_cars_active     ON cars (last_seen_at) WHERE status = 'ACTIVE';
 CREATE INDEX IF NOT EXISTS idx_cars_search     ON cars (brand_id, model_id, year, price_usd) WHERE status = 'ACTIVE';
+-- The bot's question, "what turned up since my last check". first_seen_at is
+-- written once on insert and never touched again, unlike updated_at and
+-- last_seen_at, which every run rewrites.
+CREATE INDEX IF NOT EXISTS idx_cars_first_seen ON cars (first_seen_at);
 
 
 -- Offer history: one row per observed state of an ad.

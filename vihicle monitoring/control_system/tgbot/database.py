@@ -1,5 +1,6 @@
 import asyncio
 import sys
+from datetime import timedelta
 from pathlib import Path
 
 import psycopg
@@ -19,6 +20,38 @@ MAX_WATCHES = 30
 # Enough for the popular options without a keyboard taller than the screen;
 # the rest is reachable by typing the name.
 CHOICES_LIMIT = 40
+
+# How far back a check reaches beyond last_checked_at.
+#
+# cars.first_seen_at is the start time of the scraper transaction, and a batch
+# of a thousand cars becomes visible only when that transaction commits, whole
+# seconds later. A check that runs in between would see nothing, move the
+# beacon past those cars and lose them for good. So the window is deliberately
+# too wide and sent_cars throws away what was sent before.
+CHECK_OVERLAP = timedelta(minutes=15)
+
+# The columns a filter is allowed to name, the same list as SEARCH_PARAMS in
+# keyboard.py. Kept here as well so that no key out of the jsonb can reach the
+# query, whatever ends up in the table.
+MATCH_COLUMNS = (
+    "category_id",
+    "brand_id",
+    "model_id",
+    "body_id",
+    "year",
+    "price_usd",
+    "mileage_km",
+    "fuel_id",
+    "gearbox",
+    "engine_liters",
+    "state_id",
+    "city_id",
+    "country_import",
+    "is_dealer",
+)
+
+# What a notification shows on top of the columns above.
+CARD_COLUMNS = ("car_id", "title", "url", "city", "currency", "price_main", "first_seen_at")
 
 UPSERT_USER_SQL = """
     INSERT INTO bot_users (tg_user_id, username, first_name, language)
@@ -139,7 +172,49 @@ UPSERT_WATCH_SQL = """
 """
 
 
-def _connect(**kwargs):
+# Blocked users are left out: their subscriptions keep their old beacon and
+# come back to life on the next /start, which clears is_blocked.
+ACTIVE_SUBSCRIPTIONS_SQL = """
+    SELECT s.subscription_id, s.tg_user_id, s.filters, s.summary, s.last_checked_at
+    FROM search_subscriptions s
+    JOIN bot_users u USING (tg_user_id)
+    WHERE s.is_active AND NOT u.is_blocked
+    ORDER BY s.last_checked_at
+"""
+
+NEW_CARS_SQL = """
+    SELECT {columns}
+    FROM cars
+    WHERE status = 'ACTIVE' AND first_seen_at > %s
+    ORDER BY first_seen_at
+""".format(columns=", ".join(CARD_COLUMNS + MATCH_COLUMNS))
+
+# One round trip for the whole batch: what comes back from RETURNING is what
+# this subscription has not been sent yet.
+MARK_SENT_SQL = """
+    INSERT INTO sent_cars (subscription_id, car_id)
+    SELECT %s, unnest(%s::bigint[])
+    ON CONFLICT DO NOTHING
+    RETURNING car_id
+"""
+
+UNMARK_SENT_SQL = """
+    DELETE FROM sent_cars WHERE subscription_id = %s AND car_id = ANY(%s)
+"""
+
+TOUCH_SUBSCRIPTIONS_SQL = """
+    UPDATE search_subscriptions SET last_checked_at = %s WHERE subscription_id = ANY(%s)
+"""
+
+BLOCK_USER_SQL = "UPDATE bot_users SET is_blocked = true WHERE tg_user_id = %s"
+
+CLEANUP_SENT_SQL = "DELETE FROM sent_cars WHERE sent_at < now() - interval '2 days'"
+
+
+def connect(**kwargs):
+    """A connection of its own. notifier.py keeps one for a whole check, the
+    handlers take one per query: a bot that waits on Telegram most of the time
+    has no use for a pool."""
     return psycopg.AsyncConnection.connect(**DATABASE_CONNECTION, **kwargs)
 
 
@@ -153,7 +228,7 @@ def _user_params(user):
 
 
 async def _fetchall(query, params):
-    async with await _connect() as connection:
+    async with await connect() as connection:
         cursor = await connection.execute(query, params)
         return await cursor.fetchall()
 
@@ -161,12 +236,12 @@ async def _fetchall(query, params):
 async def init_bot_db():
     """Create the bot tables if they are missing. Idempotent, safe on every start."""
     schema = await asyncio.to_thread(SCHEMA_PATH.read_text, encoding="utf-8")
-    async with await _connect() as connection:
+    async with await connect() as connection:
         await connection.execute(schema)
 
 
 async def upsert_user(user):
-    async with await _connect() as connection:
+    async with await connect() as connection:
         await connection.execute(UPSERT_USER_SQL, _user_params(user))
 
 
@@ -189,7 +264,7 @@ async def choice_by_name(column, name, parent=None):
 
 async def find_car(car_id, tg_user_id):
     """The ad plus the events this user already watches on it, or None."""
-    async with await _connect(row_factory=dict_row) as connection:
+    async with await connect(row_factory=dict_row) as connection:
         cursor = await connection.execute(FIND_CAR_SQL, {"car": car_id, "user": tg_user_id})
         return await cursor.fetchone()
 
@@ -197,7 +272,7 @@ async def find_car(car_id, tg_user_id):
 async def save_subscription(user, filters, summary):
     """Returns "created", "exists" (already running) or "limit"."""
     filters = Jsonb(filters)
-    async with await _connect() as connection:
+    async with await connect() as connection:
         await connection.execute(UPSERT_USER_SQL, _user_params(user))
 
         cursor = await connection.execute(FIND_SUBSCRIPTION_SQL, (user.id, filters))
@@ -214,9 +289,55 @@ async def save_subscription(user, filters, summary):
         return "created"
 
 
+async def db_now(connection):
+    """The database clock. The notifier's beacon has to come from the same
+    clock as first_seen_at, not from the machine the bot happens to run on."""
+    cursor = await connection.execute("SELECT now()")
+    return (await cursor.fetchone())[0]
+
+
+async def active_subscriptions(connection):
+    cursor = connection.cursor(row_factory=dict_row)
+    await cursor.execute(ACTIVE_SUBSCRIPTIONS_SQL)
+    return await cursor.fetchall()
+
+
+async def new_cars(connection, since):
+    """Every active car first seen after `since`, as dicts."""
+    cursor = connection.cursor(row_factory=dict_row)
+    await cursor.execute(NEW_CARS_SQL, (since,))
+    return await cursor.fetchall()
+
+
+async def mark_sent(connection, subscription_id, car_ids):
+    """Claim these cars for the subscription. Returns those that were not
+    claimed before, which are exactly the ones worth sending."""
+    cursor = await connection.execute(MARK_SENT_SQL, (subscription_id, list(car_ids)))
+    return [row[0] for row in await cursor.fetchall()]
+
+
+async def unmark_sent(connection, subscription_id, car_ids):
+    """Give the claim back after a failed send, so the next check retries."""
+    await connection.execute(UNMARK_SENT_SQL, (subscription_id, list(car_ids)))
+
+
+async def touch_subscriptions(connection, subscription_ids, checked_at):
+    """Move the beacon. Subscriptions that found nothing are moved as well,
+    otherwise the oldest beacon stays put and the window grows every run."""
+    await connection.execute(TOUCH_SUBSCRIPTIONS_SQL, (checked_at, list(subscription_ids)))
+
+
+async def mark_blocked(connection, tg_user_id):
+    await connection.execute(BLOCK_USER_SQL, (tg_user_id,))
+
+
+async def cleanup_sent(connection):
+    await connection.execute(CLEANUP_SENT_SQL)
+
+
 async def save_watch(user, car_id, events):
     """Returns "created", "updated" (new events on a running watch) or "limit"."""
-    async with await _connect() as connection:
+    async with await connect() as connection:
         await connection.execute(UPSERT_USER_SQL, _user_params(user))
 
         cursor = await connection.execute(FIND_WATCH_SQL, (user.id, car_id))

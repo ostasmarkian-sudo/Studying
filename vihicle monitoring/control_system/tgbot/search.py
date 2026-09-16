@@ -1,11 +1,11 @@
 import re
-from html import escape
 
 from aiogram import F, Router
 from aiogram.filters import StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, Message
+from aiogram.utils.text_decorations import html_decoration as fmt
 
 import common
 import database as db
@@ -139,7 +139,7 @@ def _menu_text(labels):
             "<b>Новий моніторинг</b>\n"
             "Оберіть параметри, і я повідомлятиму про нові оголошення за ними."
         )
-    body = "\n".join(f"{name}: <b>{escape(label)}</b>" for name, label in lines)
+    body = "\n".join(f"{name}: <b>{fmt.quote(label)}</b>" for name, label in lines)
     return f"<b>Новий моніторинг</b>\n{body}"
 
 
@@ -261,7 +261,7 @@ async def open_param(call: CallbackQuery, state: FSMContext):
     markup = await _keyboard(column, filters)
     text = f"<b>{kb.SEARCH_PARAMS[column]}</b>"
     if column in labels:
-        text += f"\nЗараз: {escape(labels[column])}"
+        text += f"\nЗараз: {fmt.quote(labels[column])}"
     await state.set_state(Search.menu)
     await common.edit(call, text, markup)
     await call.answer()
@@ -324,7 +324,7 @@ async def save(call: CallbackQuery, state: FSMContext):
     await state.clear()
     await common.edit(
         call,
-        f"🔔 <b>Моніторинг запущено</b>\n{escape(summary)}\n\n"
+        f"🔔 <b>Моніторинг запущено</b>\n{fmt.quote(summary)}\n\n"
         "Повідомлю, щойно з'являться нові оголошення.",
     )
     await call.answer()
@@ -354,7 +354,7 @@ async def manual_value(msg: Message, state: FSMContext):
             reply = f"Не зрозумів значення. {PROMPTS[column]}"
         else:
             reply = (
-                f"Не знайшов «{escape(text)}» серед оголошень. "
+                f"Не знайшов «{fmt.quote(text)}» серед оголошень. "
                 "Перевірте написання або натисніть «Скасувати» і оберіть зі списку."
             )
         await msg.answer(reply)
